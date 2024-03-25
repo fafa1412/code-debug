@@ -503,9 +503,9 @@ git clone --recursive https://github.com/chenzhiy2001/rcore-ebpf
 
 #### 配置环境
 
-1. 下载test.sh，尽量在home目录下运行
+1. 将code-debug中的test.sh换到在home目录下运行
 2. 执行chmod +x test.sh命令，为文件添加权限
-3. 执行./test.sh，开始执行，请保证网络畅通，可能要很长时间
+3. 执行./test.sh，开始执行，请保证网络畅通，可能要很长时间(期间若遇到某个部分无法安装的问题，采用手动安装再继续）
 4. 执行完毕后配置环境变量：
 ```plain
 vim ~/.bashrc
@@ -538,6 +538,14 @@ end
 #### 编译rcore-ebpf
 
 * 修改user/ebpf/build.sh里面的路径
+* 修改os/Cargo.toml中的ruprobes
+```
+ruprobes = { git = "https://github.com/chenzhiy2001/ruprobes", features = ["rCore-Tutorial"] }
+```
+* 在 os 中 make run
+* 如果遇到需要更高的nightly版本但是更新后仍出现此错误
+在rust-toolchain.toml中将channel改为更新后的版本
+
 * 如果在编译过程中遇到“找不到clang-12”报错，执行下面命令
 ```plain
 sudo apt-get install clang-12
@@ -552,6 +560,12 @@ sudo apt-get install cmake
 ```plain
 export PATH=$PATH:/home/path/to/riscv64-linux-musl-cross/bin
 ```
+*  编译时出现 unsafe {kprobes_breakpoint_handler(&mut *(_trap_cx as *const TrapContext as *mut TrapContext));} // ugly :( 语句报错
+尝试以下修改
+```
+unsafe {kprobes_breakpoint_handler(_trap_cx);}
+```
+
 * launch.json文件，记得修改路径
 
 ### 安装-方法2-手动安装
@@ -670,7 +684,7 @@ export PATH=$PATH:/home/path/to/riscv64-linux-musl-cross/bin
 
 1. 在vscode中打开本项目，按F5执行，会弹出一个新的窗口
 
-1. 在新窗口中打开rCore-Tutorial-v3项目，在 .vscode 文件夹中添加 launch.json文件，并输入以下内容，然后保存并再编译一遍rCore，接着在新窗口内按F5就可以启动gdb并调试。
+1. 在新窗口中打开rcore-ebpf项目，在 .vscode 文件夹中添加 launch.json文件，并输入以下内容，然后保存并再编译一遍rCore，接着在新窗口内按F5就可以启动gdb并调试。
 
    如果GDB并没有正常启动，可以尝试把下面的gdbpath改成绝对路径(如“/home/username/riscv64-unknown-elf-toolchain-10.2.0-2020.12.8-x86_64-linux-ubuntu14/bin”)。
 
@@ -683,7 +697,7 @@ export PATH=$PATH:/home/path/to/riscv64-linux-musl-cross/bin
                "type": "gdb",
                "request": "attach",
                "name": "Attach to Qemu",
-               "executable": "${userHome}/rCore-Tutorial-v3/os/target/riscv64gc-unknown-none-elf/release/os",
+               "executable": "${userHome}/rcore-ebpf/os/target/riscv64gc-unknown-none-elf/release/os",
                "target": ":1234",//不能和Qemu开放的tcp端口重叠
                "remote": true,
                "cwd": "${workspaceRoot}",
@@ -700,13 +714,13 @@ export PATH=$PATH:/home/path/to/riscv64-linux-musl-cross/bin
                    "-machine",
                    "virt",
                    "-bios",
-                   "${userHome}/rCore-Tutorial-v3/bootloader/rustsbi-qemu.bin",
+                   "${userHome}/rcore-ebpf/bootloader/rustsbi-qemu.bin",
                    "-display",
                    "none",
                    "-device",
-                   "loader,file=${userHome}/rCore-Tutorial-v3/os/target/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000",
+                   "loader,file=${userHome}/rcore-ebpf/os/target/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000",
                    "-drive",
-                   "file=${userHome}/rCore-Tutorial-v3/user/target/riscv64gc-unknown-none-elf/release/fs.img,if=none,format=raw,id=x0",
+                   "file=${userHome}/rcore-ebpf/user/target/riscv64gc-unknown-none-elf/release/fs.img,if=none,format=raw,id=x0",
                    "-device",
                    "virtio-blk-device,drive=x0",
                    "-device",
@@ -722,12 +736,12 @@ export PATH=$PATH:/home/path/to/riscv64-linux-musl-cross/bin
                    "-s",
                    "-S"
                ],
-            "userSpaceDebuggeeFolder": "${userHome}/rCore-Tutorial-v3/user/target/riscv64gc-unknown-none-elf/release",
-            "KERNEL_IN_BREAKPOINTS_LINE":39, // src/trap/mod.rs中内核入口行号。可能要修改
-            "KERNEL_OUT_BREAKPOINTS_LINE":745, // src/trap/mod.rs中内核出口行号。可能要修改
+            "userSpaceDebuggeeFolder": "${userHome}/rcore-ebpf/user/target/riscv64gc-unknown-none-elf/release",
+            "KERNEL_IN_BREAKPOINTS_LINE":65, // src/trap/mod.rs中内核入口行号。可能要修改
+            "KERNEL_OUT_BREAKPOINTS_LINE":124, // src/trap/mod.rs中内核出口行号。可能要修改
             "GO_TO_KERNEL_LINE":30, // src/trap/mod.rs中，用于从用户态返回内核的断点行号。在rCore-Tutorial-v3中，这是set_user_trap_entry函数中的stvec::write(TRAMPOLINE as usize, TrapMode::Direct);语句。
-            "KERNEL_IN_BREAKPOINTS_FILENAME":"${userHome}/rCore-Tutorial-v3/os/src/trap/mod.rs",
-            "KERNEL_OUT_BREAKPOINTS_FILENAME":"${userHome}/rCore-Tutorial-v3/os/src/trap/mod.rs",
+            "KERNEL_IN_BREAKPOINTS_FILENAME":"${userHome}/rcore-ebpf/os/src/trap/mod.rs",
+            "KERNEL_OUT_BREAKPOINTS_FILENAME":"${userHome}/rcore-ebpf/os/src/trap/mod.rs",
             "GO_TO_KERNEL_FILENAME":"",
             "kernel_memory_ranges":[["0xefffffffffffffff","0xffffffffffffffff"]],
             "user_memory_ranges":[["0x0000000000000000","0xe000000000000000"]]
