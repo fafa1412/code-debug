@@ -1,31 +1,11 @@
-import * as DebugAdapter from "vscode-debugadapter";
-import {
-	DebugSession,
-	InitializedEvent,
-	TerminatedEvent,
-	StoppedEvent,
-	ThreadEvent,
-	OutputEvent,
-	ContinuedEvent,
-	Thread,
-	StackFrame,
-	Scope,
-	Source,
-	Handles,
-} from "vscode-debugadapter";
-import { DebugProtocol } from "vscode-debugprotocol";
-import {
-	Breakpoint,
-	IBackend,
-	Variable,
-	VariableObject,
-	ValuesFormattingMode,
-	MIError,
-	Register,
-} from "./backend/backend";
-import { MINode } from "./backend/mi_parse";
-import { expandValue, isExpandable } from "./backend/gdb_expansion";
-import { MI2 } from "./backend/mi2/mi2";
+import * as DebugAdapter from 'vscode-debugadapter';
+import { DebugSession, InitializedEvent, TerminatedEvent, StoppedEvent, ThreadEvent, OutputEvent, ContinuedEvent, Thread, StackFrame, Scope, Source, Handles } from 'vscode-debugadapter';
+import { DebugProtocol } from 'vscode-debugprotocol';
+import { Breakpoint, IBackend, Variable, VariableObject, ValuesFormattingMode, MIError } from './backend/backend';
+import { MINode } from './backend/mi_parse';
+import { expandValue, isExpandable } from './backend/gdb_expansion';
+import { MI2 } from './backend/mi2/mi2';
+import { execSync } from 'child_process';
 import * as systemPath from "path";
 import * as net from "net";
 import * as os from "os";
@@ -45,11 +25,8 @@ class ExtendedVariable {
 }
 
 class VariableScope {
-	constructor(
-		public readonly name: string,
-		public readonly threadId: number,
-		public readonly level: number
-	) {}
+	constructor(public readonly name: string, public readonly threadId: number, public readonly level: number) {
+	}
 
 	public static variableName(handle: number, name: string): string {
 		return `var_${handle}_${name}`;
@@ -319,6 +296,17 @@ export class MI2DebugSession extends DebugSession {
 		}
 	}
 
+	// verifies that the specified command can be executed
+	protected checkCommand(debuggerName: string): boolean {
+		try {
+			const command = process.platform === 'win32' ? 'where' : 'command -v';
+			execSync(`${command} ${debuggerName}`, { stdio: 'ignore' });
+			return true;
+		} catch (error) {
+			return false;
+		}
+	}
+
 	protected setValuesFormattingMode(mode: ValuesFormattingMode) {
 		switch (mode) {
 			case "disabled":
@@ -489,21 +477,17 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		this.quitEvent();
 	}
 
-	protected disconnectRequest(
-		response: DebugProtocol.DisconnectResponse,
-		args: DebugProtocol.DisconnectArguments
-	): void {
-		if (this.attached) this.miDebugger.detach();
-		else this.miDebugger.stop();
+	protected override disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments): void {
+		if (this.attached)
+			this.miDebugger.detach();
+		else
+			this.miDebugger.stop();
 		this.commandServer.close();
 		this.commandServer = undefined;
 		this.sendResponse(response);
 	}
 
-	protected async setVariableRequest(
-		response: DebugProtocol.SetVariableResponse,
-		args: DebugProtocol.SetVariableArguments
-	): Promise<void> {
+	protected override async setVariableRequest(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments): Promise<void> {
 		try {
 			if (this.useVarObjects) {
 				let name = args.name;
@@ -530,7 +514,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		}
 	}
 
-	protected setFunctionBreakPointsRequest(response: DebugProtocol.SetFunctionBreakpointsResponse, args: DebugProtocol.SetFunctionBreakpointsArguments): void {
+	protected override setFunctionBreakPointsRequest(response: DebugProtocol.SetFunctionBreakpointsResponse, args: DebugProtocol.SetFunctionBreakpointsArguments): void {
 		const all = [];
 		args.breakpoints.forEach(brk => {
 			all.push(this.miDebugger.addBreakPoint({ raw: brk.name, condition: brk.condition, countCondition: brk.hitCondition }));
@@ -549,13 +533,8 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			this.sendErrorResponse(response, 10, msg.toString());
 		});
 	}
-
-
-	//设置某一个文件的所有断点
-	protected setBreakPointsRequest(
-		response: DebugProtocol.SetBreakpointsResponse,
-		args: DebugProtocol.SetBreakpointsArguments
-	): void {
+	/// 用于设置某一个文件的所有断点
+	protected override setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): void {
 		let path = args.source.path;
 		if (this.isSSH) {
 			// convert local path to ssh path
@@ -618,26 +597,27 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		this.customRequest("update", {} as DebugAdapter.Response, {});
 	}
 
-	protected threadsRequest(response: DebugProtocol.ThreadsResponse): void {
+	protected override threadsRequest(response: DebugProtocol.ThreadsResponse): void {
 		if (!this.miDebugger) {
 			this.sendResponse(response);
 			return;
 		}
-		this.miDebugger
-			.getThreads()
-			.then((threads) => {
-				response.body = {
-					threads: [],
-				};
-				for (const thread of threads) {
-					const threadName = thread.name || thread.targetId || "<unnamed>";
-					response.body.threads.push(new Thread(thread.id, thread.id + ":" + threadName));
-				}
+		this.miDebugger.getThreads().then(threads => {
+			response.body = {
+				threads: []
+			};
+			for (const thread of threads) {
+				const threadName = thread.name || thread.targetId || "<unnamed>";
+				response.body.threads.push(new Thread(thread.id, thread.id + ":" + threadName));
+			}
+			this.sendResponse(response);
+		}).catch((error: MIError) => {
+			if (error.message === 'Selected thread is running.') {
 				this.sendResponse(response);
-			})
-			.catch((error) => {
-				this.sendErrorResponse(response, 17, `Could not get threads: ${error}`);
-			});
+				return;
+			}
+			this.sendErrorResponse(response, 17, `Could not get threads: ${error}`);
+		});
 	}
 
 	// Supports 65535 threads.
@@ -648,7 +628,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		return [frameId & 0xffff, frameId >> 16];
 	}
 
-	protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
+	protected override stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
 		this.miDebugger.getStack(args.startFrame, args.levels, args.threadId).then(stack => {
 			const ret: StackFrame[] = [];
 			stack.forEach(element => {
@@ -682,10 +662,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		});
 	}
 
-	protected configurationDoneRequest(
-		response: DebugProtocol.ConfigurationDoneResponse,
-		args: DebugProtocol.ConfigurationDoneArguments
-	): void {
+	protected override configurationDoneRequest(response: DebugProtocol.ConfigurationDoneResponse, args: DebugProtocol.ConfigurationDoneArguments): void {
 		const promises: Thenable<any>[] = [];
 		let entryPoint: string | undefined = undefined;
 		let runToStart: boolean = false;
@@ -754,10 +731,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			});
 	}
 
-	protected scopesRequest(
-		response: DebugProtocol.ScopesResponse,
-		args: DebugProtocol.ScopesArguments
-	): void {
+	protected override scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): void {
 		const scopes = new Array<Scope>();
 		const [threadId, level] = this.frameIdToThreadAndLevel(args.frameId);
 
@@ -775,8 +749,8 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			return new Scope(scopeName, handle, expensive);
 		};
 
-		scopes.push(createScope("Local", false));
-		scopes.push(createScope("Register", true));
+		scopes.push(createScope("Locals", false));
+		scopes.push(createScope("Registers", true));
 
 		response.body = {
 			scopes: scopes,
@@ -784,15 +758,15 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		this.sendResponse(response);
 	}
 
-	protected async variablesRequest(
-		response: DebugProtocol.VariablesResponse,
-		args: DebugProtocol.VariablesArguments
-	): Promise<void> {
+	protected override async variablesRequest(response: DebugProtocol.VariablesResponse, args: DebugProtocol.VariablesArguments): Promise<void> {
 		const variables: DebugProtocol.Variable[] = [];
-		const variableHandle = this.variableHandles.get(args.variablesReference);
+		const id: VariableScope | string | VariableObject | ExtendedVariable = this.variableHandles.get(args.variablesReference);
+
 		const createVariable = (arg, options?) => {
-			if (options) return this.variableHandles.create(new ExtendedVariable(arg, options));
-			else return this.variableHandles.create(arg);
+			if (options)
+				return this.variableHandles.create(new ExtendedVariable(arg, options));
+			else
+				return this.variableHandles.create(arg);
 		};
 
 		const findOrCreateVariable = (varObj: VariableObject): number => {
@@ -806,119 +780,92 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			return varObj.isCompound() ? id : 0;
 		};
 
-		if (variableHandle instanceof VariableScope) {
-			// need Register values
-			if (variableHandle.name === "Register") {
-				const regValues = await this.miDebugger.getRegistersValues();
-				const regs = regValues.map((item) => {
-					// item[0] is ['name', 'xxx']
-					const nameIdx = parseInt(item[0][1]);
-					if (isNaN(nameIdx)) {
-						this.sendErrorResponse(response, 1, `Could not expand variable: ${item[0][1]}`);
-						return;
-					}
-					return {
-						name: RISCV_REG_NAMES[nameIdx],
-						value: item[1][1], // item[1] is ['value', 'xxx']
-						variablesReference: 0, // not a object, cannot be expended
-					};
-				});
-				response.body = {
-					variables: regs,
-				};
-				this.sendResponse(response);
-				return;
-			}
-
-			let stack: Variable[];
+		if (id instanceof VariableScope) {
 			try {
-				stack = await this.miDebugger.getStackVariables(
-					variableHandle.threadId,
-					variableHandle.level
-				);
-				for (const variable of stack) {
-					if (this.useVarObjects) {
-						try {
-							const varObjName = VariableScope.variableName(args.variablesReference, variable.name);
-							let varObj: VariableObject;
+				if (id.name == "Registers") {
+					const registers = await this.miDebugger.getRegisters();
+					for (const reg of registers) {
+						variables.push({
+							name: reg.name,
+							value: reg.valueStr,
+							variablesReference: 0
+						});
+					}
+				} else {
+					const stack: Variable[] = await this.miDebugger.getStackVariables(id.threadId, id.level);
+					for (const variable of stack) {
+						if (this.useVarObjects) {
 							try {
-								const changes = await this.miDebugger.varUpdate(varObjName);
-								const changelist = changes.result("changelist");
-								changelist.forEach((change) => {
-									const name = MINode.valueOf(change, "name");
-									const vId = this.variableHandlesReverse[name];
-									const v = this.variableHandles.get(vId) as any;
-									v.applyChanges(change);
-								});
-								const varId = this.variableHandlesReverse[varObjName];
-								varObj = this.variableHandles.get(varId) as any;
-							} catch (err) {
-								if (err instanceof MIError && err.message == "Variable object not found") {
-									varObj = await this.miDebugger.varCreate(variable.name, varObjName);
-									const varId = findOrCreateVariable(varObj);
-									varObj.exp = variable.name;
-									varObj.id = varId;
-								} else {
-									throw err;
+								const varObjName = VariableScope.variableName(args.variablesReference, variable.name);
+								let varObj: VariableObject;
+								try {
+									const changes = await this.miDebugger.varUpdate(varObjName);
+									const changelist = changes.result("changelist");
+									changelist.forEach((change) => {
+										const name = MINode.valueOf(change, "name");
+										const vId = this.variableHandlesReverse[name];
+										const v = this.variableHandles.get(vId) as any;
+										v.applyChanges(change);
+									});
+									const varId = this.variableHandlesReverse[varObjName];
+									varObj = this.variableHandles.get(varId) as any;
+								} catch (err) {
+									if (err instanceof MIError && (err.message == "Variable object not found" || err.message.endsWith("does not exist"))) {
+										varObj = await this.miDebugger.varCreate(id.threadId, id.level, variable.name, varObjName);
+										const varId = findOrCreateVariable(varObj);
+										varObj.exp = variable.name;
+										varObj.id = varId;
+									} else {
+										throw err;
+									}
 								}
-							}
-							variables.push(varObj.toProtocolVariable());
-						} catch (err) {
-							variables.push({
-								name: variable.name,
-								value: `<${err}>`,
-								variablesReference: 0,
-							});
-						}
-					} else {
-						if (variable.valueStr !== undefined) {
-							let expanded = expandValue(
-								createVariable,
-								`{${variable.name}=${variable.valueStr})`,
-								"",
-								variable.raw
-							);
-							if (expanded) {
-								if (typeof expanded[0] == "string")
-									expanded = [
-										{
-											name: "<value>",
-											value: prettyStringArray(expanded),
-											variablesReference: 0,
-										},
-									];
-								variables.push(expanded[0]);
+								variables.push(varObj.toProtocolVariable());
+							} catch (err) {
+								variables.push({
+									name: variable.name,
+									value: `<${err}>`,
+									variablesReference: 0
+								});
 							}
 						} else {
-							variables.push({
-								name: variable.name,
-								type: variable.type,
-								value: "<unknown>",
-								variablesReference: createVariable(variable.name),
-							});
+							if (variable.valueStr !== undefined) {
+								let expanded = expandValue(createVariable, `{${variable.name}=${variable.valueStr})`, "", variable.raw);
+								if (expanded) {
+									if (typeof expanded[0] == "string")
+										expanded = [
+											{
+												name: "<value>",
+												value: prettyStringArray(expanded),
+												variablesReference: 0
+											}
+										];
+									variables.push(expanded[0]);
+								}
+							} else
+								variables.push({
+									name: variable.name,
+									type: variable.type,
+									value: "<unknown>",
+									variablesReference: createVariable(variable.name)
+								});
 						}
 					}
 				}
 				response.body = {
-					variables: variables,
+					variables: variables
 				};
 				this.sendResponse(response);
 			} catch (err) {
 				this.sendErrorResponse(response, 1, `Could not expand variable: ${err}`);
 			}
-		} else if (typeof variableHandle == "string") {
+		} else if (typeof id == "string") {
 			// Variable members
 			let variable;
 			try {
 				// TODO: this evaluates on an (effectively) unknown thread for multithreaded programs.
-				variable = await this.miDebugger.evalExpression(JSON.stringify(variableHandle), 0, 0);
+				variable = await this.miDebugger.evalExpression(JSON.stringify(id), 0, 0);
 				try {
-					let expanded = expandValue(
-						createVariable,
-						variable.result("value"),
-						variableHandle,
-						variable
-					);
+					let expanded = expandValue(createVariable, variable.result("value"), id, variable);
 					if (!expanded) {
 						this.sendErrorResponse(response, 2, `Could not expand variable`);
 					} else {
@@ -927,11 +874,11 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 								{
 									name: "<value>",
 									value: prettyStringArray(expanded),
-									variablesReference: 0,
-								},
+									variablesReference: 0
+								}
 							];
 						response.body = {
-							variables: expanded,
+							variables: expanded
 						};
 						this.sendResponse(response);
 					}
@@ -941,77 +888,70 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			} catch (err) {
 				this.sendErrorResponse(response, 1, `Could not expand variable: ${err}`);
 			}
-		} else if (typeof variableHandle == "object") {
-			if (variableHandle instanceof VariableObject) {
+		} else if (typeof id == "object") {
+			if (id instanceof VariableObject) {
 				// Variable members
 				let children: VariableObject[];
 				try {
-					children = await this.miDebugger.varListChildren(variableHandle.name);
-					const vars = children.map((child) => {
+					children = await this.miDebugger.varListChildren(id.name);
+					const vars = children.map(child => {
 						const varId = findOrCreateVariable(child);
 						child.id = varId;
 						return child.toProtocolVariable();
 					});
 
 					response.body = {
-						variables: vars,
+						variables: vars
 					};
 					this.sendResponse(response);
 				} catch (err) {
 					this.sendErrorResponse(response, 1, `Could not expand variable: ${err}`);
 				}
-			} else if (variableHandle instanceof ExtendedVariable) {
-				const varReq = variableHandle;
+			} else if (id instanceof ExtendedVariable) {
+				const varReq = id;
 				if (varReq.options.arg) {
 					const strArr = [];
 					let argsPart = true;
 					let arrIndex = 0;
 					const submit = () => {
 						response.body = {
-							variables: strArr,
+							variables: strArr
 						};
 						this.sendResponse(response);
 					};
 					const addOne = async () => {
 						// TODO: this evaluates on an (effectively) unknown thread for multithreaded programs.
-						const variable = await this.miDebugger.evalExpression(
-							JSON.stringify(`${varReq.name}+${arrIndex})`),
-							0,
-							0
-						);
+						const variable = await this.miDebugger.evalExpression(JSON.stringify(`${varReq.name}+${arrIndex})`), 0, 0);
 						try {
-							const expanded = expandValue(
-								createVariable,
-								variable.result("value"),
-								varReq.name,
-								variable
-							);
+							const expanded = expandValue(createVariable, variable.result("value"), varReq.name, variable);
 							if (!expanded) {
 								this.sendErrorResponse(response, 15, `Could not expand variable`);
 							} else {
 								if (typeof expanded == "string") {
 									if (expanded == "<nullptr>") {
-										if (argsPart) argsPart = false;
-										else return submit();
+										if (argsPart)
+											argsPart = false;
+										else
+											return submit();
 									} else if (expanded[0] != '"') {
 										strArr.push({
 											name: "[err]",
 											value: expanded,
-											variablesReference: 0,
+											variablesReference: 0
 										});
 										return submit();
 									}
 									strArr.push({
-										name: `[${arrIndex++}]`,
+										name: `[${(arrIndex++)}]`,
 										value: expanded,
-										variablesReference: 0,
+										variablesReference: 0
 									});
 									addOne();
 								} else {
 									strArr.push({
 										name: "[err]",
 										value: expanded,
-										variablesReference: 0,
+										variablesReference: 0
 									});
 									submit();
 								}
@@ -1022,131 +962,78 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 					};
 					addOne();
 				} else
-					this.sendErrorResponse(
-						response,
-						13,
-						`Unimplemented variable request options: ${JSON.stringify(varReq.options)}`
-					);
+					this.sendErrorResponse(response, 13, `Unimplemented variable request options: ${JSON.stringify(varReq.options)}`);
 			} else {
 				response.body = {
-					variables: variableHandle,
+					variables: id
 				};
 				this.sendResponse(response);
 			}
 		} else {
 			response.body = {
-				variables: variables,
+				variables: variables
 			};
 			this.sendResponse(response);
 		}
 	}
 
-	protected pauseRequest(
-		response: DebugProtocol.ContinueResponse,
-		args: DebugProtocol.ContinueArguments
-	): void {
-		this.miDebugger.interrupt().then(
-			(done) => {
-				this.sendResponse(response);
-			},
-			(msg) => {
-				this.sendErrorResponse(response, 3, `Could not pause: ${msg}`);
-			}
-		);
+	protected override pauseRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
+		this.miDebugger.interrupt().then(done => {
+			this.sendResponse(response);
+		}, msg => {
+			this.sendErrorResponse(response, 3, `Could not pause: ${msg}`);
+		});
 	}
 
-	protected reverseContinueRequest(
-		response: DebugProtocol.ReverseContinueResponse,
-		args: DebugProtocol.ReverseContinueArguments
-	): void {
-		this.miDebugger.continue(true).then(
-			(done) => {
-				this.sendResponse(response);
-			},
-			(msg) => {
-				this.sendErrorResponse(response, 2, `Could not continue: ${msg}`);
-			}
-		);
+	protected override reverseContinueRequest(response: DebugProtocol.ReverseContinueResponse, args: DebugProtocol.ReverseContinueArguments): void {
+		this.miDebugger.continue(true).then(done => {
+			this.sendResponse(response);
+		}, msg => {
+			this.sendErrorResponse(response, 2, `Could not continue: ${msg}`);
+		});
 	}
 
-	protected continueRequest(
-		response: DebugProtocol.ContinueResponse,
-		args: DebugProtocol.ContinueArguments
-	): void {
-		this.miDebugger.continue().then(
-			(done) => {
-				this.sendResponse(response);
-			},
-			(msg) => {
-				this.sendErrorResponse(response, 2, `Could not continue: ${msg}`);
-			}
-		);
+	protected override continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
+		this.miDebugger.continue().then(done => {
+			this.sendResponse(response);
+		}, msg => {
+			this.sendErrorResponse(response, 2, `Could not continue: ${msg}`);
+		});
 	}
 
-	protected stepBackRequest(
-		response: DebugProtocol.StepBackResponse,
-		args: DebugProtocol.StepBackArguments
-	): void {
-		this.miDebugger.step(true).then(
-			(done) => {
-				this.sendResponse(response);
-			},
-			(msg) => {
-				this.sendErrorResponse(
-					response,
-					4,
-					`Could not step back: ${msg} - Try running 'target record-full' before stepping back`
-				);
-			}
-		);
+	protected override stepBackRequest(response: DebugProtocol.StepBackResponse, args: DebugProtocol.StepBackArguments): void {
+		this.miDebugger.step(true).then(done => {
+			this.sendResponse(response);
+		}, msg => {
+			this.sendErrorResponse(response, 4, `Could not step back: ${msg} - Try running 'target record-full' before stepping back`);
+		});
 	}
 
-	protected stepInRequest(
-		response: DebugProtocol.NextResponse,
-		args: DebugProtocol.NextArguments
-	): void {
-		this.miDebugger.step().then(
-			(done) => {
-				this.sendResponse(response);
-			},
-			(msg) => {
-				this.sendErrorResponse(response, 4, `Could not step in: ${msg}`);
-			}
-		);
+	protected override stepInRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): void {
+		this.miDebugger.step().then(done => {
+			this.sendResponse(response);
+		}, msg => {
+			this.sendErrorResponse(response, 4, `Could not step in: ${msg}`);
+		});
 	}
 
-	protected stepOutRequest(
-		response: DebugProtocol.NextResponse,
-		args: DebugProtocol.NextArguments
-	): void {
-		this.miDebugger.stepOut().then(
-			(done) => {
-				this.sendResponse(response);
-			},
-			(msg) => {
-				this.sendErrorResponse(response, 5, `Could not step out: ${msg}`);
-			}
-		);
+	protected override stepOutRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): void {
+		this.miDebugger.stepOut().then(done => {
+			this.sendResponse(response);
+		}, msg => {
+			this.sendErrorResponse(response, 5, `Could not step out: ${msg}`);
+		});
 	}
 
-	protected nextRequest(
-		response: DebugProtocol.NextResponse,
-		args: DebugProtocol.NextArguments
-	): void {
-		this.miDebugger.next().then(
-			(done) => {
-				this.sendResponse(response);
-			},
-			(msg) => {
-				this.sendErrorResponse(response, 6, `Could not step over: ${msg}`);
-			}
-		);
+	protected override nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments): void {
+		this.miDebugger.next().then(done => {
+			this.sendResponse(response);
+		}, msg => {
+			this.sendErrorResponse(response, 6, `Could not step over: ${msg}`);
+		});
 	}
 
-	protected evaluateRequest(
-		response: DebugProtocol.EvaluateResponse,
-		args: DebugProtocol.EvaluateArguments
-	): void {
+	protected override evaluateRequest(response: DebugProtocol.EvaluateResponse, args: DebugProtocol.EvaluateArguments): void {
 		const [threadId, level] = this.frameIdToThreadAndLevel(args.frameId);
 		if (args.context == "watch" || args.context == "hover") {
 			this.miDebugger.evalExpression(args.expression, threadId, level).then(
@@ -1183,7 +1070,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		}
 	}
 
-	protected gotoTargetsRequest(response: DebugProtocol.GotoTargetsResponse, args: DebugProtocol.GotoTargetsArguments): void {
+	protected override gotoTargetsRequest(response: DebugProtocol.GotoTargetsResponse, args: DebugProtocol.GotoTargetsArguments): void {
 		const path: string = this.isSSH ? this.sourceFileMap.toRemotePath(args.source.path) : args.source.path;
 		this.miDebugger.goto(path, args.line).then(done => {
 			response.body = {
@@ -1191,7 +1078,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 					id: 1,
 					label: args.source.name,
 					column: args.column,
-					line : args.line
+					line: args.line
 				}]
 			};
 			this.sendResponse(response);
@@ -1200,10 +1087,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		});
 	}
 
-	protected gotoRequest(
-		response: DebugProtocol.GotoResponse,
-		args: DebugProtocol.GotoArguments
-	): void {
+	protected override gotoRequest(response: DebugProtocol.GotoResponse, args: DebugProtocol.GotoArguments): void {
 		this.sendResponse(response);
 	}
 

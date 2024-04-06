@@ -1,4 +1,4 @@
-import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, VariableObject, MIError, Register} from "../backend";
+import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, RegisterValue, VariableObject, MIError, Register } from "../backend";
 import * as ChildProcess from "child_process";
 import { EventEmitter } from "events";
 import { parseMI, MINode } from '../mi_parse';
@@ -344,14 +344,14 @@ export class MI2 extends EventEmitter implements IBackend {
 		}
 	}
 
-	onOutputStderr(lines) {
-		lines = <string[]>lines.split("\n");
-		lines.forEach((line) => {
+	onOutputStderr(str: string) {
+		const lines = str.split('\n');
+		lines.forEach(line => {
 			this.log("stderr", line);
 		});
 	}
 
-	onOutputPartial(line) {
+	onOutputPartial(line: string) {
 		if (couldBeOutput(line)) {
 			this.logNoNewLine("stdout", line);
 			return true;
@@ -359,11 +359,9 @@ export class MI2 extends EventEmitter implements IBackend {
 		return false;
 	}
 
-	onOutput(lines) {
-		lines = <string[]>lines.split("\n");
-		console.log("lines:"+lines);
-		lines.forEach((line) => {
-			console.log("line:"+line);
+	onOutput(str: string) {
+		const lines = str.split('\n');
+		lines.forEach(line => {
 			if (couldBeOutput(line)) {
 				if (!gdbMatch.exec(line)) this.log("stdout", line);
 			} else {
@@ -615,8 +613,9 @@ export class MI2 extends EventEmitter implements IBackend {
 		return Promise.all(promisses);
 	}
 
-	setBreakPointCondition(bkptNum, condition): Thenable<any> {
-		if (trace) this.log("stderr", "setBreakPointCondition");
+	setBreakPointCondition(bkptNum: number, condition: string): Thenable<any> {
+		if (trace)
+			this.log("stderr", "setBreakPointCondition");
 		return this.sendCommand("break-condition " + bkptNum + " " + condition);
 	}
 
@@ -718,13 +717,15 @@ export class MI2 extends EventEmitter implements IBackend {
 		const result = await this.sendCommand(command);
 		const threads = result.result("threads");
 		const ret: Thread[] = [];
-		return threads.map((element) => {
+		if (!Array.isArray(threads)) { // workaround for lldb-mi bug: `'^done,threads="[]"'`
+			return ret;
+		}
+		return threads.map(element => {
 			const ret: Thread = {
 				id: parseInt(MINode.valueOf(element, "id")),
 				targetId: MINode.valueOf(element, "target-id"),
+				name: MINode.valueOf(element, "name") || MINode.valueOf(element, "details")
 			};
-
-			ret.name = MINode.valueOf(element, "details") || undefined;
 
 			return ret;
 		});
@@ -811,57 +812,112 @@ export class MI2 extends EventEmitter implements IBackend {
 		return names;
 	}
 
-	async getRegistersValues(): Promise<any[]> {
-		if (trace) this.log("stderr", "getRegistersValues");
-		const result = await this.sendCommand(`data-list-register-values r \
-		0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20\
-		21 22 23 24 25 26 27 28 29 30 31 32`);
-		/* ${riscvRegNames.indexOf("uscratch")} \
-		${riscvRegNames.indexOf("uepc")} \
-		${riscvRegNames.indexOf("ucause")} \
-		${riscvRegNames.indexOf("utval")} \
-		${riscvRegNames.indexOf("uip")} \
-		${riscvRegNames.indexOf("sstatus")} \
-		${riscvRegNames.indexOf("sedeleg")} \
-		${riscvRegNames.indexOf("sideleg")} \
-		${riscvRegNames.indexOf("sie")} \
-		${riscvRegNames.indexOf("stvec")} \
-		${riscvRegNames.indexOf("scounteren")} \
-		${riscvRegNames.indexOf("sscratch")} \
-		${riscvRegNames.indexOf("sepc")} \
-		${riscvRegNames.indexOf("scause")} \
-		${riscvRegNames.indexOf("stval")} \
-		${riscvRegNames.indexOf("sip")} \
-		${riscvRegNames.indexOf("satp")} \
-		${riscvRegNames.indexOf("mstatus")} \
-		${riscvRegNames.indexOf("misa")} \
-		${riscvRegNames.indexOf("medeleg")} \
-		${riscvRegNames.indexOf("mideleg")} \
-		${riscvRegNames.indexOf("mie")} \
-		${riscvRegNames.indexOf("mtvec")} \
-		${riscvRegNames.indexOf("mcounteren")} \ */
+	// 
+	/// We already have new code doing this so it becomes outdated
+	//
+	//
+	// async getRegistersValues(): Promise<any[]> {
+	// 	if (trace) this.log("stderr", "getRegistersValues");
+	// 	const result = await this.sendCommand(`data-list-register-values r \
+	// 	0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20\
+	// 	21 22 23 24 25 26 27 28 29 30 31 32`);
+	// 	/* ${riscvRegNames.indexOf("uscratch")} \
+	// 	${riscvRegNames.indexOf("uepc")} \
+	// 	${riscvRegNames.indexOf("ucause")} \
+	// 	${riscvRegNames.indexOf("utval")} \
+	// 	${riscvRegNames.indexOf("uip")} \
+	// 	${riscvRegNames.indexOf("sstatus")} \
+	// 	${riscvRegNames.indexOf("sedeleg")} \
+	// 	${riscvRegNames.indexOf("sideleg")} \
+	// 	${riscvRegNames.indexOf("sie")} \
+	// 	${riscvRegNames.indexOf("stvec")} \
+	// 	${riscvRegNames.indexOf("scounteren")} \
+	// 	${riscvRegNames.indexOf("sscratch")} \
+	// 	${riscvRegNames.indexOf("sepc")} \
+	// 	${riscvRegNames.indexOf("scause")} \
+	// 	${riscvRegNames.indexOf("stval")} \
+	// 	${riscvRegNames.indexOf("sip")} \
+	// 	${riscvRegNames.indexOf("satp")} \
+	// 	${riscvRegNames.indexOf("mstatus")} \
+	// 	${riscvRegNames.indexOf("misa")} \
+	// 	${riscvRegNames.indexOf("medeleg")} \
+	// 	${riscvRegNames.indexOf("mideleg")} \
+	// 	${riscvRegNames.indexOf("mie")} \
+	// 	${riscvRegNames.indexOf("mtvec")} \
+	// 	${riscvRegNames.indexOf("mcounteren")} \ */
 
-		//czy test
-		//const result = new MINode(114514,[],{resultClass:"resultClass",results:[["string","any"]],});
-		const registers = result.result("register-values");
-		// console.log(registers);
-		const ret: Register[] = [];
-		/* viloent ugly way */
-		//ret.push({name:"all",valueStr:registers});
-		//vilonet way
-		return registers;
-		// elegant way
-		/*
-		for (const element of registers) {
-			const key = MINode.valueOf(element, "number");
-			const value = MINode.valueOf(element, "value");
+	// 	//czy test
+	// 	//const result = new MINode(114514,[],{resultClass:"resultClass",results:[["string","any"]],});
+	// 	const registers = result.result("register-values");
+	// 	// console.log(registers);
+	// 	const ret: Register[] = [];
+	// 	/* viloent ugly way */
+	// 	//ret.push({name:"all",valueStr:registers});
+	// 	//vilonet way
+	// 	return registers;
+	// 	// elegant way
+	// 	/*
+	// 	for (const element of registers) {
+	// 		const key = MINode.valueOf(element, "number");
+	// 		const value = MINode.valueOf(element, "value");
+	// 		ret.push({
+	// 			name: key,
+	// 			valueStr: value,
+	// 		});
+	// 	}
+	// 	*/
+
+	// 	return ret;
+	// }
+
+	async getRegisters(): Promise<Variable[]> {
+		if (trace)
+			this.log("stderr", "getRegisters");
+
+		// Getting register names and values are separate GDB commands.
+		// We first retrieve the register names and then the values.
+		// The register names should never change, so we could cache and reuse them,
+		// but for now we just retrieve them every time to keep it simple.
+		const names = await this.getRegisterNames();
+		const values = await this.getRegisterValues();
+		const ret: Variable[] = [];
+		for (const val of values) {
+			const key = names[val.index];
+			const value = val.value;
+			const type = "string";
 			ret.push({
 				name: key,
 				valueStr: value,
+				type: type
 			});
 		}
-		*/
+		return ret;
+	}
 
+	async getRegisterNames(): Promise<string[]> {
+		if (trace)
+			this.log("stderr", "getRegisterNames");
+		const result = await this.sendCommand("data-list-register-names");
+		const names = result.result('register-names');
+		if (!Array.isArray(names)) {
+			throw new Error('Failed to retrieve register names.');
+		}
+		return names.map(name => name.toString());
+	}
+
+	async getRegisterValues(): Promise<RegisterValue[]> {
+		if (trace)
+			this.log("stderr", "getRegisterValues");
+		const result = await this.sendCommand("data-list-register-values N 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32");//todo THIS IS RISC-V ONLY!
+		const nodes = result.result('register-values');
+		if (!Array.isArray(nodes)) {
+			throw new Error('Failed to retrieve register values.');
+		}
+		const ret: RegisterValue[] = nodes.map(node => {
+			const index = parseInt(MINode.valueOf(node, "number"));
+			const value = MINode.valueOf(node, "value");
+			return { index: index, value: value };
+		});
 		return ret;
 	}
 
@@ -892,13 +948,14 @@ export class MI2 extends EventEmitter implements IBackend {
 		return await this.sendCommand(command);
 	}
 
-	async varCreate(
-		expression: string,
-		name: string = "-",
-		frame: string = "@"
-	): Promise<VariableObject> {
-		if (trace) this.log("stderr", "varCreate");
-		const res = await this.sendCommand(`var-create ${this.quote(name)} ${frame} "${expression}"`);
+	async varCreate(threadId: number, frameLevel: number, expression: string, name: string = "-", frame: string = "@"): Promise<VariableObject> {
+		if (trace)
+			this.log("stderr", "varCreate");
+		let miCommand = "var-create ";
+		if (threadId != 0) {
+			miCommand += `--thread ${threadId} --frame ${frameLevel}`;
+		}
+		const res = await this.sendCommand(`${miCommand} ${this.quote(name)} ${frame} "${expression}"`);
 		return new VariableObject(res.result(""));
 	}
 

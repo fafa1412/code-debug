@@ -36,7 +36,7 @@ class MagoDebugSession extends MI2DebugSession {
 		super(debuggerLinesStartAt1, isServer);
 	}
 
-	protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
+	protected override initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
 		response.body.supportsHitConditionalBreakpoints = true;
 		response.body.supportsConfigurationDoneRequest = true;
 		response.body.supportsConditionalBreakpoints = true;
@@ -49,8 +49,13 @@ class MagoDebugSession extends MI2DebugSession {
 		return 0;
 	}
 
-	protected launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments): void {
-		this.miDebugger = new MI2_Mago(args.magomipath || "mago-mi", ["-q"], args.debugger_args, args.env);
+	protected override launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments): void {
+		const dbgCommand = args.magomipath || "mago-mi";
+		if (this.checkCommand(dbgCommand)) {
+			this.sendErrorResponse(response, 104, `Configured debugger ${dbgCommand} not found.`);
+			return;
+		}
+		this.miDebugger = new MI2_Mago(dbgCommand, ["-q"], args.debugger_args, args.env);
 		this.initDebugger();
 		this.quit = false;
 		this.attached = false;
@@ -68,8 +73,13 @@ class MagoDebugSession extends MI2DebugSession {
 		});
 	}
 
-	protected attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments): void {
-		this.miDebugger = new MI2_Mago(args.magomipath || "mago-mi", [], args.debugger_args, args.env);
+	protected override attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments): void {
+		const dbgCommand = args.magomipath || "mago-mi";
+		if (this.checkCommand(dbgCommand)) {
+			this.sendErrorResponse(response, 104, `Configured debugger ${dbgCommand} not found.`);
+			return;
+		}
+		this.miDebugger = new MI2_Mago(dbgCommand, ["-q"], args.debugger_args, args.env);
 		this.initDebugger();
 		this.quit = false;
 		this.attached = true;

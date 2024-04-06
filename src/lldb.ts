@@ -37,7 +37,7 @@ export interface AttachRequestArguments extends DebugProtocol.AttachRequestArgum
 }
 
 class LLDBDebugSession extends MI2DebugSession {
-	protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
+	protected override initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
 		response.body.supportsGotoTargetsRequest = true;
 		response.body.supportsHitConditionalBreakpoints = true;
 		response.body.supportsConfigurationDoneRequest = true;
@@ -47,8 +47,13 @@ class LLDBDebugSession extends MI2DebugSession {
 		this.sendResponse(response);
 	}
 
-	protected launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments): void {
-		this.miDebugger = new MI2_LLDB(args.lldbmipath || "lldb-mi", [], args.debugger_args, args.env);
+	protected override launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments): void {
+		const dbgCommand = args.lldbmipath || "lldb-mi";
+		if (this.checkCommand(dbgCommand)) {
+			this.sendErrorResponse(response, 104, `Configured debugger ${dbgCommand} not found.`);
+			return;
+		}
+		this.miDebugger = new MI2_LLDB(dbgCommand, [], args.debugger_args, args.env);
 		this.setPathSubstitutions(args.pathSubstitutions);
 		this.initDebugger();
 		this.quit = false;
@@ -88,8 +93,13 @@ class LLDBDebugSession extends MI2DebugSession {
 		}
 	}
 
-	protected attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments): void {
-		this.miDebugger = new MI2_LLDB(args.lldbmipath || "lldb-mi", [], args.debugger_args, args.env);
+	protected override attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments): void {
+		const dbgCommand = args.lldbmipath || "lldb-mi";
+		if (this.checkCommand(dbgCommand)) {
+			this.sendErrorResponse(response, 104, `Configured debugger ${dbgCommand} not found.`);
+			return;
+		}
+		this.miDebugger = new MI2_LLDB(dbgCommand, [], args.debugger_args, args.env);
 		this.setPathSubstitutions(args.pathSubstitutions);
 		this.initDebugger();
 		this.quit = false;

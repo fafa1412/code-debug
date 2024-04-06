@@ -66,11 +66,8 @@ export interface AttachRequestArguments extends DebugProtocol.AttachRequestArgum
 }
 
 let NEXT_TERM_ID = 1;
-export class GDBDebugSession extends MI2DebugSession {
-	protected initializeRequest(
-		response: DebugProtocol.InitializeResponse,
-		args: DebugProtocol.InitializeRequestArguments
-	): void {
+class GDBDebugSession extends MI2DebugSession {
+	protected override initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
 		response.body.supportsGotoTargetsRequest = true;
 		response.body.supportsHitConditionalBreakpoints = true;
 		response.body.supportsConfigurationDoneRequest = true;
@@ -84,8 +81,13 @@ export class GDBDebugSession extends MI2DebugSession {
 		this.sendResponse(response);
 	}
 
-	protected launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments): void {
-		this.miDebugger = new MI2(args.gdbpath || "gdb", ["-q", "--interpreter=mi2"], args.debugger_args, args.env);
+	protected override launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments): void {
+		const dbgCommand = args.gdbpath || "gdb";
+		if (this.checkCommand(dbgCommand)) {
+			this.sendErrorResponse(response, 104, `Configured debugger ${dbgCommand} not found.`);
+			return;
+		}
+		this.miDebugger = new MI2(dbgCommand, ["-q", "--interpreter=mi2"], args.debugger_args, args.env);
 		this.setPathSubstitutions(args.pathSubstitutions);
 		this.initDebugger();
 		this.quit = false;
@@ -126,7 +128,19 @@ export class GDBDebugSession extends MI2DebugSession {
 		this.steppingStatus={isStepping:false,steppingTo:null};
 	}
 
-	protected attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments): void {
+	protected override attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments): void {
+
+
+		const dbgCommand = args.gdbpath || "gdb";
+
+		/* We (code-debug the OS Debugger Devs) use custom shell scripts as "gdbpath", so we don't check commands here. 
+
+		if (this.checkCommand(dbgCommand)) {
+			this.sendErrorResponse(response, 104, `Configured debugger ${dbgCommand} not found.`);
+			return;
+		}
+		*/
+		this.miDebugger = new MI2(dbgCommand, ["-q", "--interpreter=mi2"], args.debugger_args, args.env);
 		const converted_args = this.getQemuLaunchCmd(args);
 		if (converted_args.length == 0) {
 			this.sendErrorResponse(
@@ -168,7 +182,6 @@ export class GDBDebugSession extends MI2DebugSession {
 			10,
 			undefined
 		);
-		this.miDebugger = new MI2(args.gdbpath || "gdb", ["-q", "--interpreter=mi2"], args.debugger_args, args.env);
 		this.setPathSubstitutions(args.pathSubstitutions);
 		this.initDebugger();
 		this.quit = false;
