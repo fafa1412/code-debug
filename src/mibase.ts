@@ -21,7 +21,8 @@ import {getAddrFromMINode, isKernelBreakpoint, isKernelPath} from "./utils";
 
 
 class ExtendedVariable {
-	constructor(public name, public options) {}
+	constructor(public name: string, public options: { "arg": any }) {
+	}
 }
 
 class VariableScope {
@@ -204,12 +205,12 @@ export class MI2DebugSession extends DebugSession {
 	protected serverPath: string;
 	protected running: boolean = false;
 	protected addressSpaces = new AddressSpaces("kernel", this); //for rCore
-	public KERNEL_IN_BREAKPOINTS_LINE;//TODO THIS SHOULD HAVE BEEN IN gdb.ts. However Codes that uses those stuff are all in mibase.ts. :(
-	public KERNEL_OUT_BREAKPOINTS_LINE;
-	public GO_TO_KERNEL_LINE;
-	public KERNEL_IN_BREAKPOINTS_FILENAME;//those names are really confusing :(
-	public KERNEL_OUT_BREAKPOINTS_FILENAME;
-	public GO_TO_KERNEL_FILENAME;
+	public KERNEL_IN_BREAKPOINTS_LINE:number;//TODO THIS SHOULD HAVE BEEN IN gdb.ts. However Codes that uses those stuff are all in mibase.ts. :(
+	public KERNEL_OUT_BREAKPOINTS_LINE:number;
+	public GO_TO_KERNEL_LINE:number;
+	public KERNEL_IN_BREAKPOINTS_FILENAME:string;//those names are really confusing :(
+	public KERNEL_OUT_BREAKPOINTS_FILENAME:string;
+	public GO_TO_KERNEL_FILENAME:string;
 	public kernel_memory_ranges:string[][];
 	public user_memory_ranges:string[][];
 	public steppingStatus:SteppingStatus={isStepping:false,steppingTo:null};//是否在不停地单步
@@ -259,7 +260,7 @@ export class MI2DebugSession extends DebugSession {
 						func = rawCmd.substring(0, spaceIndex);
 						args = JSON.parse(rawCmd.substring(spaceIndex + 1));
 					}
-					Promise.resolve(this.miDebugger[func].apply(this.miDebugger, args)).then((data) => {
+					Promise.resolve((this.miDebugger as any)[func].apply(this.miDebugger, args)).then(data => {
 						c.write(data.toString());
 					});
 				});
@@ -515,15 +516,15 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 	}
 
 	protected override setFunctionBreakPointsRequest(response: DebugProtocol.SetFunctionBreakpointsResponse, args: DebugProtocol.SetFunctionBreakpointsArguments): void {
-		const all = [];
+		const all: Thenable<[boolean, Breakpoint]>[] = [];
 		args.breakpoints.forEach(brk => {
 			all.push(this.miDebugger.addBreakPoint({ raw: brk.name, condition: brk.condition, countCondition: brk.hitCondition }));
 		});
 		Promise.all(all).then(brkpoints => {
-			const finalBrks = [];
+			const finalBrks: DebugProtocol.Breakpoint[] = [];
 			brkpoints.forEach(brkp => {
 				if (brkp[0])
-					finalBrks.push({ line: brkp[1].line });
+					finalBrks.push({ line: brkp[1].line, verified: true });
 			});
 			response.body = {
 				breakpoints: finalBrks
@@ -540,45 +541,39 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			// convert local path to ssh path
 			path = this.sourceFileMap.toRemotePath(path);
 		}
-		this.miDebugger.clearBreakPoints(args.source.path).then(
-			() => {
-				let spaceName = "";
-				if(isKernelPath(path)){
-					spaceName = "kernel";
-				}else{
-					spaceName = path;
-				}
-				//清空该文件的断点
-				//保存断点信息，如果这个断点不是当前空间的（比如还在内核态时就设置用户态的断点），暂时不通知GDB设置断点
-				//如果这个断点是当前地址空间，或者是内核入口断点，那么就通知GDB立即设置断点
-				if ((spaceName === this.addressSpaces.getCurrentSpaceName()) || (path === this.GO_TO_KERNEL_FILENAME && args.breakpoints[0].line === this.GO_TO_KERNEL_LINE)
-				) {
-					// TODO rules can be set by user
-					this.addressSpaces.saveBreakpointsToSpace(args, spaceName);				}
-				else {
-					this.sendEvent({
-						event: "showInformationMessage",
-						body: "Breakpoints Not in Current Address Space. Saved",
-					} as DebugProtocol.Event);
-					this.addressSpaces.saveBreakpointsToSpace(args, spaceName);
-					return;
-				}
-				//令GDB设置断点
-				const all = args.breakpoints.map((brk) => {
-					return this.miDebugger.addBreakPoint({
-						file: path,
-						line: brk.line,
-						condition: brk.condition,
-						countCondition: brk.hitCondition,
-					});
-				});
-				Promise.all(all).then(
-					(brkpoints) => {
-						const finalBrks = [];
-						brkpoints.forEach((brkp) => {
-							// TODO: Currently all breakpoints returned are marked as verified,
-							// which leads to verified breakpoints on a broken lldb.
-							if (brkp[0]) finalBrks.push(new DebugAdapter.Breakpoint(true, brkp[1].line));
+		this.miDebugger.clearBreakPoints(path).then(() => {
+			let spaceName = "";
+			if(isKernelPath(path)){
+				spaceName = "kernel";
+			}else{
+				spaceName = path;
+			}
+			//清空该文件的断点
+			//保存断点信息，如果这个断点不是当前空间的（比如还在内核态时就设置用户态的断点），暂时不通知GDB设置断点
+			//如果这个断点是当前地址空间，或者是内核入口断点，那么就通知GDB立即设置断点
+			if ((spaceName === this.addressSpaces.getCurrentSpaceName()) || (path === this.GO_TO_KERNEL_FILENAME && args.breakpoints[0].line === this.GO_TO_KERNEL_LINE)
+			) {
+				// TODO rules can be set by user
+				this.addressSpaces.saveBreakpointsToSpace(args, spaceName);				}
+			else {
+				this.sendEvent({
+					event: "showInformationMessage",
+					body: "Breakpoints Not in Current Address Space. Saved",
+				} as DebugProtocol.Event);
+				this.addressSpaces.saveBreakpointsToSpace(args, spaceName);
+				return;
+			}
+			const all = args.breakpoints.map(brk => {
+				return this.miDebugger.addBreakPoint({ file: path, line: brk.line, condition: brk.condition, countCondition: brk.hitCondition });
+			});
+			//令GDB设置断点
+			Promise.all(all).then(brkpoints => {
+				const finalBrks: DebugProtocol.Breakpoint[] = [];
+				brkpoints.forEach(brkp => {
+					// TODO: Currently all breakpoints returned are marked as verified,
+					// which leads to verified breakpoints on a broken lldb.
+					if (brkp[0])
+						finalBrks.push(new DebugAdapter.Breakpoint(true, brkp[1].line));
 						});
 						response.body = {
 							breakpoints: finalBrks,
@@ -762,9 +757,9 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 		const variables: DebugProtocol.Variable[] = [];
 		const id: VariableScope | string | VariableObject | ExtendedVariable = this.variableHandles.get(args.variablesReference);
 
-		const createVariable = (arg, options?) => {
+		const createVariable = (arg: string | VariableObject, options?: any) => {
 			if (options)
-				return this.variableHandles.create(new ExtendedVariable(arg, options));
+				return this.variableHandles.create(new ExtendedVariable(typeof arg === 'string' ? arg : arg.name, options));
 			else
 				return this.variableHandles.create(arg);
 		};
@@ -801,7 +796,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 								try {
 									const changes = await this.miDebugger.varUpdate(varObjName);
 									const changelist = changes.result("changelist");
-									changelist.forEach((change) => {
+									changelist.forEach((change: any) => {
 										const name = MINode.valueOf(change, "name");
 										const vId = this.variableHandlesReverse[name];
 										const v = this.variableHandles.get(vId) as any;
@@ -910,7 +905,7 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			} else if (id instanceof ExtendedVariable) {
 				const varReq = id;
 				if (varReq.options.arg) {
-					const strArr = [];
+					const strArr: DebugProtocol.Variable[] = [];
 					let argsPart = true;
 					let arrIndex = 0;
 					const submit = () => {
@@ -1288,15 +1283,15 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 
 
 
-function findAddr(info:MINode){
-	for(let i in info){
-		if(info[i]){
+// function findAddr(info:MINode){
+// 	for(let i in info){
+// 		if(info[i]){
 			
-		}
-	}
-}
+// 		}
+// 	}
+// }
 
-function prettyStringArray(strings) {
+function prettyStringArray(strings: any) {
 	if (typeof strings == "object") {
 		if (strings.length !== undefined) return strings.join(", ");
 		else return JSON.stringify(strings);
