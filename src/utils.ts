@@ -70,4 +70,4 @@ export function getPathFromMINode(info: MINode): string {
 
 
 
-export const prettyPrintJSON = obj => JSON.stringify( obj, (key, val) => (val instanceof Array) ? JSON.stringify(val) : val, 2).replace(/\\/g, '').replace(/\[/g, '[').replace(/\]/g,']').replace(/\{/g, '{').replace(/\}/g,'}');
+export const prettyPrintJSON = (obj:any) => JSON.stringify( obj, (key, val) => (val instanceof Array) ? JSON.stringify(val) : val, 2).replace(/\\/g, '').replace(/\[/g, '[').replace(/\]/g,']').replace(/\{/g, '{').replace(/\}/g,'}');
