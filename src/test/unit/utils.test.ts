@@ -4,7 +4,7 @@ import { getAddrFromMINode, getPathFromMINode } from '../../utils';
 
 suite("parser", () => {
 	test("Test getAddrFromMINode", () => {
-		let testMINode1: MINode = {
+		const testMINode1: MINode = {
 			"token": 43,
 			"outOfBandRecord": [],
 			"resultRecords": {
@@ -45,7 +45,7 @@ suite("parser", () => {
 		assert.strictEqual(getAddrFromMINode(testMINode1), "0x0000000000010156");
 	});
 	test("Test getPathFromMINode", () => {
-		let testMINode2: MINode = {
+		const testMINode2: MINode = {
 			"token": 23,
 			"outOfBandRecord": [{
 				"isStream": false,
@@ -77,5 +77,5 @@ suite("parser", () => {
 			}]
 		} as MIInfo as MINode;
 		assert.strictEqual(getPathFromMINode(testMINode2), "/home/oslab/Starry/modules/axtask/src/task.rs");
-	})
+	});
 });

@@ -22,7 +22,7 @@ export interface Stack {
 	address: string;
 	function: string;
 	fileName: string;
-	file: string;
+	file: string; // with file path
 	line: number;
 }
 

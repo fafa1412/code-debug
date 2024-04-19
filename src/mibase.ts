@@ -17,8 +17,75 @@ import { Address } from "cluster";
 import { strict } from "assert";
 import { debugPort } from "process";
 import { RISCV_REG_NAMES } from "./frontend/consts";
-import {getAddrFromMINode, isKernelBreakpoint, isKernelPath} from "./utils";
+import {Action, DebuggerActions, OSEvent, OSEvents, OSState, OSStateMachine, stateTransition} from './OSStateMachine';
+import { Func } from 'mocha';
+import { ObjectAsFunction, toFunctionString } from './utils';
 
+
+const global = 1;
+
+export type FunctionString = string;
+
+export class HookBreakpointJSONFriendly{
+	breakpoint:Breakpoint;
+	behavior:ObjectAsFunction;
+}
+export function toHookBreakpoint(h:HookBreakpointJSONFriendly):HookBreakpoint{
+	return new HookBreakpoint(h.breakpoint, toFunctionString(h.behavior));
+}
+export class HookBreakpoint{
+	breakpoint:Breakpoint;
+	behavior:FunctionString;
+	constructor(breakpoint:Breakpoint, behavior:FunctionString){
+		this.breakpoint = breakpoint;
+		this.behavior = behavior;
+	}
+}
+// use this to get next process name
+export class HookBreakpoints {
+	private hooks:HookBreakpoint[];
+	constructor(hooks:HookBreakpoint[]){
+		this.hooks = hooks;
+	}
+	// we cannot compare functions so we always override them
+	public set(newHook:HookBreakpoint){
+		let hookPositionAlreadyExists = false;
+		for(const hook of this.hooks){
+			if (hook.breakpoint.file === newHook.breakpoint.file && hook.breakpoint.line === newHook.breakpoint.line){
+				hookPositionAlreadyExists = true;
+				hook.behavior = newHook.behavior;
+			}
+		}
+		if(hookPositionAlreadyExists === false){
+			this.hooks.push(new HookBreakpoint(newHook.breakpoint, newHook.behavior));
+		}
+	}
+	// again, we cannot compare functions, so if linenumber and filepath are the same, the hook will be removed
+	public remove(breakpointOfHook:Breakpoint){
+		this.hooks = this.hooks.filter(b=>(b.breakpoint.file !== breakpointOfHook.file || b.breakpoint.line !== breakpointOfHook.line));
+	}
+	// Implementing Iterable protocol
+	[Symbol.iterator](): Iterator<HookBreakpoint> {
+		let index = 0;
+		const hooks = this.hooks;
+
+		return {
+			next(): IteratorResult<HookBreakpoint> {
+				if (index < hooks.length) {
+					return {
+						done: false,
+						value: hooks[index++]
+					};
+				} else {
+					return {
+						done: true,
+						value: undefined // You can omit this line or return any other value here
+					};
+				}
+			}
+		};
+	}
+}
 
 class ExtendedVariable {
 	constructor(public name: string, public options: { "arg": any }) {
@@ -40,75 +107,95 @@ export enum RunCommand {
 	NONE,
 }
 
-class AddressSpace {
+export class Border  {
+	filepath:string;
+	line:number;
+	constructor(filepath:string, line:number){
+		this.filepath = filepath;
+		this.line = line;
+	}
+}
+// we recommend the name of BreakpointGroup to be the full file path of the debugged file
+// when one file is sufficient for one BreakpointGroup
+class BreakpointGroup {
 	name: string;
 	setBreakpointsArguments: DebugProtocol.SetBreakpointsArguments[];
-	constructor(name: string, setBreakpointsArguments: DebugProtocol.SetBreakpointsArguments[]) {
+	border?:Border; // can be a border or undefined
+	hooks:HookBreakpoints; //cannot be `undefined`. It should at least an empty array `[]`.
+	constructor(name: string, setBreakpointsArguments: DebugProtocol.SetBreakpointsArguments[], hooks:HookBreakpoints, border:Border ) {
+		console.log(name);
 		this.name = name;
 		this.setBreakpointsArguments = setBreakpointsArguments;
+		this.hooks = hooks;
+		this.border = border;
 	}
 }
 //负责断点缓存，转换等
-class AddressSpaces {
-	protected spaces: AddressSpace[];
-	protected currentSpaceName: string;
-	protected debugSession: MI2DebugSession;
-	constructor(currentSpace: string, debugSession: MI2DebugSession) {
+export class BreakpointGroups {
+	protected groups: BreakpointGroup[];
+	protected currentBreakpointGroupName: string;
+	protected nextBreakpointGroup:string;
+	protected readonly debugSession: MI2DebugSession; // A "pointer" pointing to debug session
+	constructor(currentBreakpointGroupName: string, debugSession: MI2DebugSession, nextBreakpointGroup:string) {
 		this.debugSession = debugSession;
-		this.spaces = [];
-		this.spaces.push(new AddressSpace(currentSpace, []));
-		this.currentSpaceName = currentSpace;
+		this.groups = [];
+		this.groups.push(new BreakpointGroup(currentBreakpointGroupName, [], new HookBreakpoints([]), undefined));
+		this.currentBreakpointGroupName = currentBreakpointGroupName;
+		this.nextBreakpointGroup = nextBreakpointGroup;
 	}
-	//将当前空间的断点清除（缓存不清除）
-	public disableCurrentSpaceBreakpoints() {
+	// Let GDB remove breakpoints of current breakpoint group
+	// but the breakpoints info in current breakpoint group remains unchanged
+	public disableCurrentBreakpointGroupBreakpoints() {
 		let currentIndex = -1;
-		for (let j = 0; j < this.spaces.length; j++) {
-			if (this.spaces[j].name === this.currentSpaceName) {
+		for (let j = 0; j < this.groups.length; j++) {
+			if (this.groups[j].name === this.getCurrentBreakpointGroupName()) {
 				currentIndex = j;
 			}
 		}
-		//假设this.spaces内缓存的断点信息和GDB里真实的断点信息完全一致。理论上确实是完全一致的。
+		//我们假设this.groups内缓存的断点信息和GDB里真实的断点信息完全一致。由于设置的断点有时会偏移几行，这不一定会发生。
+		//因此，边界断点（Border属性）单独放置，而且边界断点是将已经设好的断点变成边界，因此不会有偏移的问题，从而避开这个问题。
 		//未来可以尝试令gdb删除某个文件里的所有断点
 		if (currentIndex === -1) {
-			//别写成=
 			return;
 		}
-		this.spaces[currentIndex].setBreakpointsArguments.forEach((e) => {
+		this.groups[currentIndex].setBreakpointsArguments.forEach((e) => {
 			this.debugSession.miDebugger.clearBreakPoints(e.source.path);
-			this.debugSession.sendEvent({
-				event: "showInformationMessage",
-				body: "disableCurrentSpaceBreakpoints successed. index= " + currentIndex,
-			} as DebugProtocol.Event);
+			this.debugSession.showInformationMessage("disableCurrentBreakpointGroupBreakpoints successed. index= " + currentIndex);
 		});
 	}
-	//功能和disableCurrentSpaceBreakpoints有重合。可考虑精简代码
+	//功能和disableCurrentBreakpointGroupBreakpoints有重合。
 	//断点被触发时会调用该函数。如果空间发生变化（如kernel=>'src/bin/initproc.rs'）
-	//缓存旧空间的断点，清除旧空间的断点，加载新空间的断点
-	public updateCurrentSpace(updateTo: string) {
+	//缓存旧空间的断点，令GDB清除旧断点组的断点，卸载旧断点组的符号表文件，加载新断点组的符号表文件，加载新断点组的断点
+	public updateCurrentBreakpointGroup(updateTo: string) {
 		let newIndex = -1;
-		for (let i = 0; i < this.spaces.length; i++) {
-			if (this.spaces[i].name === updateTo) {
+		for (let i = 0; i < this.groups.length; i++) {
+			if (this.groups[i].name === updateTo) {
 				newIndex = i;
 			}
 		}
 		if (newIndex === -1) {
-			this.spaces.push(new AddressSpace(updateTo, []));
-			newIndex = this.spaces.length - 1;
+			this.groups.push(new BreakpointGroup(updateTo, [], new HookBreakpoints([]), undefined));
+			newIndex = this.groups.length - 1;
 		}
 		let oldIndex = -1;
-		for (let j = 0; j < this.spaces.length; j++) {
-			if (this.spaces[j].name === this.currentSpaceName) {
+		for (let j = 0; j < this.groups.length; j++) {
+			if (this.groups[j].name === this.getCurrentBreakpointGroupName()) {
 				oldIndex = j;
 			}
 		}
 		if (oldIndex === -1) {
-			this.spaces.push(new AddressSpace(this.currentSpaceName, []));
-			oldIndex = this.spaces.length - 1;
+			this.groups.push(new BreakpointGroup(this.getCurrentBreakpointGroupName(), [], new HookBreakpoints([]), undefined));
+			oldIndex = this.groups.length - 1;
 		}
-		this.spaces[oldIndex].setBreakpointsArguments.forEach((e) => {
+		this.groups[oldIndex].setBreakpointsArguments.forEach((e) => {
 			this.debugSession.miDebugger.clearBreakPoints(e.source.path);
 		});
-		this.spaces[newIndex].setBreakpointsArguments.forEach((args) => {
+
+		this.debugSession.miDebugger.removeSymbolFile(eval(this.debugSession.breakpointGroupNameToDebugFilePath)(this.getCurrentBreakpointGroupName()));
+
+		this.debugSession.miDebugger.addSymbolFile(eval(this.debugSession.breakpointGroupNameToDebugFilePath)(this.groups[newIndex].name));
+
+		this.groups[newIndex].setBreakpointsArguments.forEach((args) => {
 			this.debugSession.miDebugger.clearBreakPoints(args.source.path).then(
 				() => {
 					let path = args.source.path;
@@ -130,58 +217,134 @@ class AddressSpaces {
 				}
 			);
 		});
-		this.currentSpaceName = this.spaces[newIndex].name;
-
-
+		this.currentBreakpointGroupName = this.groups[newIndex].name;
+		this.debugSession.showInformationMessage("breakpoint group changed to " + updateTo);
 	}
-	public getCurrentSpaceName() {
-		return this.currentSpaceName;
+	//there should NOT be an `setCurrentBreakpointGroupName()` func because changing currentGroupName also need to change breakpoint group itself, which is what `updateCurrentBreakpointGroup()` does.
+	public getCurrentBreakpointGroupName():string {
+		return this.currentBreakpointGroupName;
 	}
-	///当设置一新断点时会调用该函数。将断点信息保存到对应的空间中。
-	public saveBreakpointsToSpace(args: DebugProtocol.SetBreakpointsArguments, spaceName: string) {
+	// notice it can return undefined
+	public getBreakpointGroupByName(groupName:string){
+		for (const k of this.groups){
+			if (k.name === groupName){
+				return k;
+			}
+		}
+		return;
+	}
+	// notice it can return undefined
+	public getCurrentBreakpointGroup():BreakpointGroup{
+		const groupName = this.getCurrentBreakpointGroupName();
+		for (const k of this.groups){
+			if (k.name === groupName){
+				return k;
+			}
+		}
+		return;
+	}
+	public getNextBreakpointGroup(){
+		return this.nextBreakpointGroup;
+	}
+	public setNextBreakpointGroup(groupName:string){
+		this.nextBreakpointGroup = groupName;
+	}
+	public getAllBreakpointGroups():readonly BreakpointGroup[]{
+		return this.groups;
+	}
+	// save breakpoint information into a breakpoint group, but NOT let GDB set those breakpoints yet
+	public saveBreakpointsToBreakpointGroup(args: DebugProtocol.SetBreakpointsArguments, groupName: string) {
 		let found = -1;
-		for (let i = 0; i < this.spaces.length; i++) {
-			if (this.spaces[i].name === spaceName) {
+		for (let i = 0; i < this.groups.length; i++) {
+			if (this.groups[i].name === groupName) {
 				found = i;
 			}
 		}
 		if (found === -1) {
-			this.spaces.push(new AddressSpace(spaceName, []));
-			found = this.spaces.length - 1;
+			this.groups.push(new BreakpointGroup(groupName, [], new HookBreakpoints([]), undefined));
+			found = this.groups.length - 1;
 		}
 		let alreadyThere = -1;
-		for (let i = 0; i < this.spaces[found].setBreakpointsArguments.length; i++) {
-			if (this.spaces[found].setBreakpointsArguments[i].source.path === args.source.path) {
-				this.spaces[found].setBreakpointsArguments[i] = args;
+		for (let i = 0; i < this.groups[found].setBreakpointsArguments.length; i++) {
+			if (this.groups[found].setBreakpointsArguments[i].source.path === args.source.path) {
+				this.groups[found].setBreakpointsArguments[i] = args;
 				alreadyThere = i;
 			}
 		}
 		if (alreadyThere === -1) {
-			this.spaces[found].setBreakpointsArguments.push(args);
+			this.groups[found].setBreakpointsArguments.push(args);
 		}
 	}
-	///仅用于reset
+
+	public updateBorder(border: Border) {
+		const result = eval(this.debugSession.filePathToBreakpointGroupNames)(border.filepath);
+		const groupNamesOfBorder:string[] = result;
+		for(const groupNameOfBorder of groupNamesOfBorder){
+			let groupExists = false;
+			for(const group of this.groups){
+				if(group.name === groupNameOfBorder){
+					groupExists = true;
+					group.border = border;
+				}
+			}
+			if(groupExists === false){
+				this.groups.push(new BreakpointGroup(groupNameOfBorder, [], new HookBreakpoints([]), border));
+			}
+		}
+	}
+	// breakpoints are still there but they are no longer borders
+	public disableBorder(border: Border) {
+		const groupNamesOfBorder:string[] = eval(this.debugSession.filePathToBreakpointGroupNames)(border.filepath);
+		for(const groupNameOfBorder of groupNamesOfBorder){
+			let groupExists = false;
+			for(const group of this.groups){
+				if(group.name === groupNameOfBorder){
+					groupExists = true;
+					group.border = undefined;
+				}
+			}
+			if(groupExists === false){
+				//do nothing
+			}
+		}
+	}
+	public updateHookBreakpoint(hook: HookBreakpointJSONFriendly) {
+		const groupNames:string[] = eval(this.debugSession.filePathToBreakpointGroupNames)(hook.breakpoint.file);
+		for(const groupName of groupNames){
+			let groupExists = false;
+			for(const existingGroup of this.groups){
+				if(existingGroup.name === groupName){
+					groupExists = true;
+					existingGroup.hooks.set(toHookBreakpoint(hook));
+					this.debugSession.showInformationMessage('hooks set ' + JSON.stringify(existingGroup.hooks));
+				}
+			}
+			if(groupExists === false){
+				this.groups.push(new BreakpointGroup(groupName, [], new HookBreakpoints([toHookBreakpoint(hook)]), undefined));
+			}
+		}
+	}
+	// the breakpoints are still set, but they will no longer trigger user-defined behavior.
+	public disableHookBreakpoint(hook: HookBreakpointJSONFriendly) {
+		const groupNames:string[] = eval(this.debugSession.filePathToBreakpointGroupNames)(hook.breakpoint.file);
+		for(const groupName of groupNames){
+			let groupExists = false;
+			for(const existingGroup of this.groups){
+				if(existingGroup.name === groupName){
+					groupExists = true;
+					existingGroup.hooks.remove(hook.breakpoint);
+				}
+			}
+			if(groupExists === false){
+				// do nothing
+			}
+		}
+	}
+
+	// 仅用于reset
 	public removeAllBreakpoints() {
-		this.spaces = [];
+		this.groups = [];
 	}
-	public status() {
-		return JSON.stringify({
-			current: this.currentSpaceName,
-			spaces: this.spaces,
-		});
-	}
-}
-
-enum privilegeLevel{
-	kernel,
-	user,
-	unknown,
-	hypervisor//not yet supported
-}
-
-class SteppingStatus{
-	isStepping:boolean;
-	steppingTo:privilegeLevel|null=null
 }
 
 /// Debug Adapter
@@ -204,19 +367,20 @@ export class MI2DebugSession extends DebugSession {
 	protected commandServer: net.Server;
 	protected serverPath: string;
 	protected running: boolean = false;
-	protected addressSpaces = new AddressSpaces("kernel", this); //for rCore
-	public KERNEL_IN_BREAKPOINTS_LINE:number;//TODO THIS SHOULD HAVE BEEN IN gdb.ts. However Codes that uses those stuff are all in mibase.ts. :(
-	public KERNEL_OUT_BREAKPOINTS_LINE:number;
-	public GO_TO_KERNEL_LINE:number;
-	public KERNEL_IN_BREAKPOINTS_FILENAME:string;//those names are really confusing :(
-	public KERNEL_OUT_BREAKPOINTS_FILENAME:string;
-	public GO_TO_KERNEL_FILENAME:string;
+	// following is related to OS debugging
+	protected program_counter_id:number;
+	protected first_breakpoint_group:string;
+	protected second_breakpoint_group:string;
 	public kernel_memory_ranges:string[][];
 	public user_memory_ranges:string[][];
-	public steppingStatus:SteppingStatus={isStepping:false,steppingTo:null};//是否在不停地单步
-	public currentAddr:number;
-	public privilegeLevelJustChanged:boolean=false;
-	public currentPrivilegeLevel:privilegeLevel=privilegeLevel.kernel;
+	protected breakpointGroups:BreakpointGroups;
+	public filePathToBreakpointGroupNames:FunctionString;
+	public breakpointGroupNameToDebugFilePath:FunctionString;
+	public OSStateMachine = OSStateMachine;
+	public OSState:OSState;
+	protected recentStopThreadID: number;
+	protected OSDebugReady: boolean = false;
+	protected currentHook:HookBreakpoint|undefined = undefined;
 
 
 
@@ -238,17 +402,7 @@ export class MI2DebugSession extends DebugSession {
 		this.miDebugger.on("signal-stop", this.handlePause.bind(this));
 		this.miDebugger.on("thread-created", this.threadCreatedEvent.bind(this));
 		this.miDebugger.on("thread-exited", this.threadExitedEvent.bind(this));
-		this.miDebugger.once("debug-ready", () => this.sendEvent(new InitializedEvent()));
-		/* czy
-		vscode.debug.registerDebugAdapterTrackerFactory('*', {
-			createDebugAdapterTracker() {
-			  return {
-				onWillReceiveMessage: () => that.sendEvent({ event: "customEvent", body: ["testsRoot"] } as DebugProtocol.Event),
-				onDidSendMessage:() => that.sendEvent({ event: "customEvent", body: ["testsRoot"] } as DebugProtocol.Event)
-			  };
-			}
-		  });
-		  */
+		this.miDebugger.once("debug-ready", () => {this.OSDebugReady = true; this.sendEvent(new InitializedEvent());});
 		try {
 			this.commandServer = net.createServer((c) => {
 				c.on("data", (data) => {
@@ -335,88 +489,87 @@ export class MI2DebugSession extends DebugSession {
 example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done","results":[["threads",[[["id","1"],["target-id","Thread 1.1"],["details","CPU#0 [running]"],["frame",[["level","0"],["addr","0x0000000000010156"],["func","initproc::main"],["args",[]],["file","src/bin/initproc.rs"],["fullname","/home/czy/rCore-Tutorial-v3/user/src/bin/initproc.rs"],["line","13"],["arch","riscv:rv64"]]],["state","stopped"]]]],["current-thread-id","1"]]}}
 */
 	protected handleBreakpoint(info: MINode) {
-		this.updateCurrentAddrAtStop(info);
 		const event = new StoppedEvent("breakpoint", parseInt(info.record("thread-id")));
 		(event as DebugProtocol.StoppedEvent).body.allThreadsStopped =
 			info.record("stopped-threads") == "all";
 		this.sendEvent(event);
-		//this.sendEvent({ event: "info", body: info } as DebugProtocol.Event);
-		//TODO only for rCore currently
-		if (
-			this.addr2privilege(Number(getAddrFromMINode(info)))===privilegeLevel.kernel
-		) {
-			this.addressSpaces.updateCurrentSpace("kernel");
-			this.sendEvent({ event: "inKernel" } as DebugProtocol.Event);
-			if (
-				info.outOfBandRecord[0].output[3][1][3][1] === this.KERNEL_OUT_BREAKPOINTS_FILENAME &&
-				info.outOfBandRecord[0].output[3][1][5][1] === this.KERNEL_OUT_BREAKPOINTS_LINE+""
-			) {
-				this.sendEvent({ event: "kernelToUserBorder" } as DebugProtocol.Event);
-			}else if(info.outOfBandRecord[0].output[3][1][3][1] === "src/syscall/process.rs" &&
-			info.outOfBandRecord[0].output[3][1][5][1] === "49")//TODO hardcoded
-			{
-				this.miDebugger.sendCliCommand("p path").then((result)=>{
-					
-					let info=this.miDebugger.getMIinfo(result.token);
-					
-					const pname_ = /(?<=")(.*?)(?=\\)/g;
-					let info1=JSON.stringify(info);
-					this.sendEvent({ event: "showInformationMessage", body: "info.length-1= "+(info.length-1).toString()  } as DebugProtocol.Event);
-					let all_info="";
-					for(let i=info.length-1;i>=0;i--){
-						all_info=all_info + info[i].outOfBandRecord[0].content;
-					}
-					this.sendEvent({ event: "showInformationMessage", body: "all info: "+all_info  } as DebugProtocol.Event);
-					let addr_regex=/(0x|0X)[a-fA-F0-9]{8}/;
-					let pname0_addr=all_info.match(addr_regex)[0].toString();
-					this.sendEvent({ event: "newProcessNameAddr", body: pname0_addr  } as DebugProtocol.Event);
-
-					// let len_regex = /(?<= len: )[0-9]+/;
-					// let pname0_len=all_info.match(len_regex)[0].toString();
-
-					// let pname=pname0.slice(0,10);
-					// this.sendEvent({ event: "get_pname", body: pname } as DebugProtocol.Event);
-					
-		})
-	}
-		} else {
-			const userProgramName = info.outOfBandRecord[0].output[3][1][4][1];
-			this.addressSpaces.updateCurrentSpace(userProgramName);
-			this.sendEvent({
-				event: "inUser",
-				body: { userProgramName: userProgramName },
-			} as DebugProtocol.Event);
-
+		if(this.OSDebugReady){
+			this.recentStopThreadID = parseInt(info.record("thread-id"));
+			this.OSStateTransition(new OSEvent(OSEvents.STOPPED));
 		}
-	}
-	/// update currentAddr, currentPrivilegeLevel, privilegeLevelJustChanged
-	public updateCurrentAddrAtStop(info:MINode) {
-		this.currentAddr = Number(getAddrFromMINode(info));
-		let newCurrentPrivilegeLevel = this.addr2privilege(this.currentAddr);
-		
-		if (newCurrentPrivilegeLevel !== this.currentPrivilegeLevel){
-			this.privilegeLevelJustChanged=true;
-		}else{
-			this.privilegeLevelJustChanged=false;
-		}
-		this.currentPrivilegeLevel = newCurrentPrivilegeLevel;
+
+
+		// 	//this.sendEvent({ event: "info", body: info } as DebugProtocol.Event);
+		// 	//TODO only for rCore currently
+		// 	if (
+		// 		this.addr2privilege(Number(getAddrFromMINode(info)))===privilegeLevel.kernel
+		// 	) {
+		// 		this.addressSpaces.updateCurrentSpace("kernel");
+		// 		this.sendEvent({ event: "inKernel" } as DebugProtocol.Event);
+		// 		if (
+		// 			info.outOfBandRecord[0].output[3][1][3][1] === this.KERNEL_OUT_BREAKPOINTS_FILENAME &&
+		// 			info.outOfBandRecord[0].output[3][1][5][1] === this.KERNEL_OUT_BREAKPOINTS_LINE+""
+		// 		) {
+		// 			this.sendEvent({ event: "kernelToUserBorder" } as DebugProtocol.Event);
+		// 		}else if(info.outOfBandRecord[0].output[3][1][3][1] === "src/syscall/process.rs" &&
+		// 		info.outOfBandRecord[0].output[3][1][5][1] === "49")//TODO hardcoded
+		// 		{
+		// 			this.miDebugger.sendCliCommand("p path").then((result)=>{
+
+		// 				let info=this.miDebugger.getMIinfo(result.token);
+
+		// 				const pname_ = /(?<=")(.*?)(?=\\)/g;
+		// 				let info1=JSON.stringify(info);
+		// 				this.sendEvent({ event: "showInformationMessage", body: "info.length-1= "+(info.length-1).toString()  } as DebugProtocol.Event);
+		// 				let all_info="";
+		// 				for(let i=info.length-1;i>=0;i--){
+		// 					all_info=all_info + info[i].outOfBandRecord[0].content;
+		// 				}
+		// 				this.sendEvent({ event: "showInformationMessage", body: "all info: "+all_info  } as DebugProtocol.Event);
+		// 				let addr_regex=/(0x|0X)[a-fA-F0-9]{8}/;
+		// 				let pname0_addr=all_info.match(addr_regex)[0].toString();
+		// 				this.sendEvent({ event: "newProcessNameAddr", body: pname0_addr  } as DebugProtocol.Event);
+
+		// 				// let len_regex = /(?<= len: )[0-9]+/;
+		// 				// let pname0_len=all_info.match(len_regex)[0].toString();
+
+		// 				// let pname=pname0.slice(0,10);
+		// 				// this.sendEvent({ event: "get_pname", body: pname } as DebugProtocol.Event);
+
+		// 	})
+		// }
+		// 	} else {
+		// 		const userProgramName = info.outOfBandRecord[0].output[3][1][4][1];
+		// 		this.addressSpaces.updateCurrentSpace(userProgramName);
+		// 		this.sendEvent({
+		// 			event: "inUser",
+		// 			body: { userProgramName: userProgramName },
+		// 		} as DebugProtocol.Event);
+
+	// 	}
 	}
 
 	protected handleBreak(info?: MINode) {
-		this.updateCurrentAddrAtStop(info);
 		const event = new StoppedEvent("step", info ? parseInt(info.record("thread-id")) : 1);
 		(event as DebugProtocol.StoppedEvent).body.allThreadsStopped = info
 			? info.record("stopped-threads") == "all"
 			: true;
 		this.sendEvent(event);
+		if(this.OSDebugReady){
+			this.recentStopThreadID = parseInt(info.record("thread-id"));
+			this.OSStateTransition(new OSEvent(OSEvents.STOPPED));
+		}
 	}
 
 	protected handlePause(info: MINode) {
-		this.updateCurrentAddrAtStop(info);
 		const event = new StoppedEvent("user request", parseInt(info.record("thread-id")));
 		(event as DebugProtocol.StoppedEvent).body.allThreadsStopped =
 			info.record("stopped-threads") == "all";
 		this.sendEvent(event);
+		if(this.OSDebugReady){
+			this.recentStopThreadID = parseInt(info.record("thread-id"));
+			this.OSStateTransition(new OSEvent(OSEvents.STOPPED));
+		}
 	}
 
 	/*example of info:
@@ -425,29 +578,17 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 	 [["reason","end-stepping-range"],["frame",[["addr","0xffffffc0802cb77e"],["func","axtask::task::first_into_user"],["args",[[["name","kernel_sp"],["value","18446743801062787952"]],[["name","frame_base"],["value","18446743801062787672"]]]],["file","modules/axtask/src/task.rs"],["fullname","/home/oslab/Starry/modules/axtask/src/task.rs"],["line","746"],["arch","riscv:rv64"]]],["thread-id","1"],["stopped-threads","all"]]}]}
 	 */
 	protected stopEvent(info: MINode) {
-		this.updateCurrentAddrAtStop(info);
 		if (!this.started) this.crashed = true;
 		if (!this.quit) {
-			if(this.steppingStatus.isStepping){
-				if(this.privilegeLevelJustChanged){
-					this.stopStepping();
-				}else{
-					this.miDebugger.sendCliCommand('si');
-					return;
-				}
-			}
 			const event = new StoppedEvent("exception", parseInt(info.record("thread-id")));
 			(event as DebugProtocol.StoppedEvent).body.allThreadsStopped =
 				info.record("stopped-threads") == "all";
 			this.sendEvent(event);
+			if(this.OSDebugReady){
+				this.recentStopThreadID = parseInt(info.record("thread-id"));
+				this.OSStateTransition(new OSEvent(OSEvents.STOPPED));
+			}
 		}
-	}
-	public stopStepping() {
-		this.steppingStatus={isStepping:false,steppingTo:null};
-		this.sendEvent({
-			event: "kernelSingleSteppedToUser",
-			body: {},
-		} as DebugProtocol.Event);
 	}
 
 	protected threadCreatedEvent(info: MINode) {
@@ -536,33 +677,30 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 	}
 	/// 用于设置某一个文件的所有断点
 	protected override setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): void {
+		// the path is supposed to be FULL PATH like /home/czy/project/file.c
 		let path = args.source.path;
 		if (this.isSSH) {
 			// convert local path to ssh path
 			path = this.sourceFileMap.toRemotePath(path);
 		}
+		//先清空该文件内的断点，再重新设置所有断点
 		this.miDebugger.clearBreakPoints(path).then(() => {
-			let spaceName = "";
-			if(isKernelPath(path)){
-				spaceName = "kernel";
-			}else{
-				spaceName = path;
+			const groupNames:string[] = eval(this.filePathToBreakpointGroupNames)(path);
+			const currentGroupName = this.breakpointGroups.getCurrentBreakpointGroupName();
+			//保存这些断点信息到断点所属的断点组（可能不止一个）里
+			for(const groupName of groupNames){
+				this.breakpointGroups.saveBreakpointsToBreakpointGroup(args, groupName);
 			}
-			//清空该文件的断点
-			//保存断点信息，如果这个断点不是当前空间的（比如还在内核态时就设置用户态的断点），暂时不通知GDB设置断点
-			//如果这个断点是当前地址空间，或者是内核入口断点，那么就通知GDB立即设置断点
-			if ((spaceName === this.addressSpaces.getCurrentSpaceName()) || (path === this.GO_TO_KERNEL_FILENAME && args.breakpoints[0].line === this.GO_TO_KERNEL_LINE)
-			) {
-				// TODO rules can be set by user
-				this.addressSpaces.saveBreakpointsToSpace(args, spaceName);				}
-			else {
-				this.sendEvent({
-					event: "showInformationMessage",
-					body: "Breakpoints Not in Current Address Space. Saved",
-				} as DebugProtocol.Event);
-				this.addressSpaces.saveBreakpointsToSpace(args, spaceName);
-				return;
+			//注意，此时断点组管理模块里已经有完整的断点相关的信息了
+
+			let flag = false;
+			for(const groupName of groupNames){
+				if(groupName === currentGroupName) { flag = true; }
 			}
+			//如果这些断点所属的断点组和当前断点组没有交集，比如还在内核态时就设置用户态的断点，就结束函数，不通知GDB设置断点
+			if(flag === false) return;
+
+			//反之，如果这些断点所属的断点组中有一个就是当前断点组，那么就通知GDB立即设置断点
 			const all = args.breakpoints.map(brk => {
 				return this.miDebugger.addBreakPoint({ file: path, line: brk.line, condition: brk.condition, countCondition: brk.hitCondition });
 			});
@@ -574,22 +712,21 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 					// which leads to verified breakpoints on a broken lldb.
 					if (brkp[0])
 						finalBrks.push(new DebugAdapter.Breakpoint(true, brkp[1].line));
-						});
-						response.body = {
-							breakpoints: finalBrks,
-						};
-						this.sendResponse(response);
-					},
-					(msg) => {
-						this.sendErrorResponse(response, 9, msg.toString());
-					}
-				);
+				});
+				response.body = {
+					breakpoints: finalBrks,
+				};
+				this.sendResponse(response);
 			},
 			(msg) => {
 				this.sendErrorResponse(response, 9, msg.toString());
 			}
+			);
+		},
+		(msg) => {
+			this.sendErrorResponse(response, 9, msg.toString());
+		}
 		);
-		this.customRequest("update", {} as DebugAdapter.Response, {});
 	}
 
 	protected override threadsRequest(response: DebugProtocol.ThreadsResponse): void {
@@ -1174,70 +1311,12 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 				this.sendEvent({ event: "eventTest", body: ["test"] } as DebugProtocol.Event);
 				this.sendResponse(response);
 				break;
-			case "memValuesRequest":
-				this.miDebugger.examineMemory(args.from, args.length).then((data) => {
-					this.sendEvent({
-						event: "memValues",
-						body: { data: data, from: args.from, length: args.length },
-					} as DebugProtocol.Event);
-				});
-				this.sendResponse(response);
-				break;
-			case "addDebugFile":
-				this.miDebugger.sendCliCommand("add-symbol-file " + args.debugFilepath);
-				break;
-			case "removeDebugFile":
-				this.miDebugger.sendCliCommand("remove-symbol-file " + args.debugFilepath);
-				break;
-			case "setKernelInBreakpoints": //remove previous breakpoints in this source
-				this.setBreakPointsRequest(
-					response as DebugProtocol.SetBreakpointsResponse,
-					{
-						source: { path: this.KERNEL_IN_BREAKPOINTS_FILENAME } as DebugProtocol.Source,
-						breakpoints: [{ line: this.KERNEL_IN_BREAKPOINTS_LINE }] as DebugProtocol.SourceBreakpoint[], //TODO change this to GO_TO_KERNEL?
-					} as DebugProtocol.SetBreakpointsArguments
-				);
-				break;
-			case "setKernelOutBreakpoints": //remove previous breakpoints in this source
-				this.setBreakPointsRequest(
-					response as DebugProtocol.SetBreakpointsResponse,
-					{
-						source: { path: this.KERNEL_OUT_BREAKPOINTS_FILENAME } as DebugProtocol.Source,
-						breakpoints: [{ line: this.KERNEL_OUT_BREAKPOINTS_LINE }] as DebugProtocol.SourceBreakpoint[],
-					} as DebugProtocol.SetBreakpointsArguments
-				);
-				break;
-			// case "setKernelOutBreakpoints": //out only
-				// break;
-			case "removeAllCliBreakpoints":
-				this.addressSpaces.removeAllBreakpoints();
+			case "removeAllCliBreakpoints": // removing cli breakpoints means remove breakpoints in both breakpoint group and GDB
+				this.breakpointGroups.removeAllBreakpoints();
 				this.miDebugger.sendCliCommand("del");
-				this.customRequest("update", {} as DebugAdapter.Response, {});
 				break;
-			case "goToKernel":
-				this.addressSpaces.disableCurrentSpaceBreakpoints();
-				this.setBreakPointsRequest(
-					response as DebugProtocol.SetBreakpointsResponse,
-					{
-						source: { path: this.GO_TO_KERNEL_FILENAME } as DebugProtocol.Source,
-						breakpoints: [{ line: this.GO_TO_KERNEL_LINE }] as DebugProtocol.SourceBreakpoint[],
-					} as DebugProtocol.SetBreakpointsArguments
-				);
-				//this.sendEvent({ event: "eventTest"} as DebugProtocol.Event);
-				this.sendEvent({ event: "trap_handle" } as DebugProtocol.Event);
-				break;
-			// case "update":
-			// 	this.sendEvent({
-			// 		event: "update",
-			// 		body: { data: this.addressSpaces.status() },
-			// 	} as DebugProtocol.Event);
-			// 	this.sendResponse(response);
-			// 	break;
-			case "updateCurrentSpace":
-				this.addressSpaces.updateCurrentSpace(args);
-				break;
-			case "disableCurrentSpaceBreakpoints":
-				this.addressSpaces.disableCurrentSpaceBreakpoints();
+			case "disableCurrentBreakpointGroupBreakpoints":
+				this.breakpointGroups.disableCurrentBreakpointGroupBreakpoints();
 				break;
 			case 'send_gdb_cli_command':
 				this.miDebugger.sendCliCommand(args);
@@ -1245,51 +1324,166 @@ example: {"token":43,"outOfBandRecord":[],"resultRecords":{"resultClass":"done",
 			case 'send_gdb_mi_command':
 				this.miDebugger.sendCommand(args);
 				break;
-			case 'getStringFromAddr':
-				this.miDebugger.sendCliCommand("x /s "+args).then((result)=>{
-					// let quotation_regex = /"(.*?)"/;
-					// let info=this.miDebugger.getMIinfo(result.token);
-					// this.sendEvent({ event: "printThisInConsole", body: info  } as DebugProtocol.Event);
-				});
+			case 'setBorder':
+				// args have border type
+				this.breakpointGroups.updateBorder(args as Border);
 				break;
-			case 'kernelSingleSteppingToUser'://this is so fucking stupid
-				this.steppingStatus={isStepping:true,steppingTo:privilegeLevel.user};
-				this.miDebugger.sendCommand('si');
+			case 'disableBorder':
+				// args have border type
+				this.breakpointGroups.disableBorder(args);
+				break;
+			case 'setHookBreakpoint':
+				// args has type HookBreakpointJSONFriendly
+				this.breakpointGroups.updateHookBreakpoint(args);
 				break;
 			default:
+				this.showInformationMessage("unknown customRequest: " + command);
 				return this.sendResponse(response);
 		}
 	}
 
+	public showInformationMessage(info:string){
+		this.sendEvent({
+			event: "showInformationMessage",
+			body: info,
+		} as DebugProtocol.Event);
 
-	public sendDebugSessionEvent(anything: any) {
-		this.sendEvent(anything);
 	}
 
-	public addr2privilege(addr64: number):privilegeLevel {
-		for(let i = 0;i<this.kernel_memory_ranges.length;i++){//[a,b) 左闭右开
-			if(Number(this.kernel_memory_ranges[i][0])<=addr64 && addr64<Number(this.kernel_memory_ranges[i][1])){
-				return privilegeLevel.kernel;
+	public async getStringVariable(name:string):Promise<string>{
+		const node = await this.miDebugger.sendCliCommand('x /s ' + name + '.vec.buf.ptr.pointer.pointer');
+		const resultstring = this.miDebugger.getOriginallyNoTokenMINodes(node.token)[0].outOfBandRecord[0].content;
+		this.showInformationMessage("`getStringVariable` got string: " + resultstring);
+		return /"(.*?)"/.exec(resultstring)[1];// we want things INSIDE double quotes so it's [1], the first captured group.
+	}
+
+	public OSStateTransition(event: OSEvent){
+		let actions:Action[];
+		[this.OSState, actions] = stateTransition(this.OSStateMachine, this.OSState, event);
+		// go through the actions to determine
+		// what should be done
+		actions.forEach(action => {this.doAction(action);});
+	}
+
+	public doAction(action:Action){
+		if(action.type === DebuggerActions.check_if_kernel_yet){
+			this.showInformationMessage('doing action: check_if_kernel_yet');
+			this.miDebugger.getSomeRegisters([this.program_counter_id]).then(v => {
+				const addr = parseInt(v[0].valueStr, 16);
+				if(this.isKernelAddr(addr)){
+					this.showInformationMessage('arrived at kernel. current addr:' + addr.toString(16));
+					this.OSStateTransition(new OSEvent(OSEvents.AT_KERNEL));
+				}else{
+					this.miDebugger.stepInstruction();
+				}
+			});
+		}
+		else if(action.type === DebuggerActions.check_if_user_yet){
+			this.showInformationMessage('doing action: check_if_user_yet');
+			this.miDebugger.getSomeRegisters([this.program_counter_id]).then(v => {
+				const addr = parseInt(v[0].valueStr, 16);
+				if(this.isUserAddr(addr)){
+					this.showInformationMessage('arrived at user. current addr:' + addr.toString(16));
+					this.OSStateTransition(new OSEvent(OSEvents.AT_USER));
+				}else{
+					this.miDebugger.stepInstruction();
+				}
+			});
+		}
+		// obviously we are at kernel breakpoint group when executing this action
+		else if(action.type === DebuggerActions.check_if_kernel_to_user_border_yet){
+			this.showInformationMessage('doing action: check_if_kernel_to_user_border_yet');
+			let filepath:string = "";
+			let lineNumber:number = -1;
+			const kernelToUserBorderFile = this.breakpointGroups.getCurrentBreakpointGroup().border?.filepath;
+			const kernelToUserBorderLine = this.breakpointGroups.getCurrentBreakpointGroup().border?.line;
+			//todo if you are trying to do multi-core debugging, you might need to modify the 3rd argument.
+			this.miDebugger.getStack(0, 1, this.recentStopThreadID).then(v=>{
+				filepath = v[0].file;
+				lineNumber = v[0].line;
+				if (filepath === kernelToUserBorderFile && lineNumber === kernelToUserBorderLine){
+					this.OSStateTransition(new OSEvent(OSEvents.AT_KERNEL_TO_USER_BORDER));
+				}
+			});
+		}
+		// obviously we are at current user breakpoint group when executing this action
+		else if(action.type === DebuggerActions.check_if_user_to_kernel_border_yet){
+			this.showInformationMessage('doing action: check_if_user_to_kernel_border_yet');
+			let filepath:string = "";
+			let lineNumber:number = -1;
+			const userToKernelBorderFile = this.breakpointGroups.getCurrentBreakpointGroup().border?.filepath;
+			const userToKernelBorderLine = this.breakpointGroups.getCurrentBreakpointGroup().border?.line;
+			//todo if you are trying to do multi-core debugging, you might need to modify the 3rd argument.
+			this.miDebugger.getStack(0, 1, this.recentStopThreadID).then(v=>{
+				filepath = v[0].file;
+				lineNumber = v[0].line;
+				if (filepath === userToKernelBorderFile && lineNumber === userToKernelBorderLine){
+					this.OSStateTransition(new OSEvent(OSEvents.AT_USER_TO_KERNEL_BORDER));
+				}
+			});
+
+		}
+		else if(action.type === DebuggerActions.start_consecutive_single_steps){
+			this.showInformationMessage("doing action: start_consecutive_single_steps");
+			// after this single step finished, `STOPPED` event will trigger next single step according to the state machine
+			this.miDebugger.stepInstruction();
+		}
+		else if(action.type === DebuggerActions.try_get_next_breakpoint_group_name){
+			this.showInformationMessage('doing action: try_get_next_breakpoint_group_name');
+			let filepath:string = "";
+			let lineNumber:number = -1;
+			//todo if you are trying to do multi-core debugging, you might need to modify the 3rd argument.
+			this.miDebugger.getStack(0, 1, this.recentStopThreadID).then(v=>{
+				filepath = v[0].file;
+				lineNumber = v[0].line;
+				//if `behavior()` has not been executed, `this.breakpointGroups.nextBreakpointGroup` stays the same.
+				for(const hook of this.breakpointGroups.getCurrentBreakpointGroup().hooks){
+					//todo since hook.behavior is async, it is possible that os jump to border before the hook finished, causing nextbreakpointgroup not updated properly.
+					//in this extreme case, use `this.currentHook`.
+					this.currentHook = hook;
+					this.showInformationMessage('hook is ' + hook.behavior);
+					if (filepath === hook.breakpoint.file && lineNumber === hook.breakpoint.line){
+						eval(hook.behavior)().then((hookResult:string)=>{
+							this.breakpointGroups.setNextBreakpointGroup(hookResult);
+							this.currentHook = undefined;
+							this.showInformationMessage('finished action: try_get_next_breakpoint_group_name.\nNext breakpoint group is ' + hookResult);
+						});
+					}
+				}
+			});
+
+		}
+		else if(action.type === DebuggerActions.high_level_switch_breakpoint_group_to_low_level){//for example, user to kernel
+			const high_level_breakpoint_group_name = this.breakpointGroups.getCurrentBreakpointGroupName();
+			this.breakpointGroups.updateCurrentBreakpointGroup(this.breakpointGroups.getNextBreakpointGroup());
+			this.breakpointGroups.setNextBreakpointGroup(high_level_breakpoint_group_name);// if a hook is triggered during low level execution, NextBreakpointGroup will be set to the return value of hook behavior function.
+		}
+		else if(action.type === DebuggerActions.low_level_switch_breakpoint_group_to_high_level){//for example, kernel to user
+			const low_level_breakpoint_group_name = this.breakpointGroups.getCurrentBreakpointGroupName();
+			const high_level_breakpoint_group_name = this.breakpointGroups.getNextBreakpointGroup();
+			this.breakpointGroups.updateCurrentBreakpointGroup(high_level_breakpoint_group_name);
+			this.breakpointGroups.setNextBreakpointGroup(low_level_breakpoint_group_name);
+		}
+
+	}
+
+	public isKernelAddr(addr64:number):boolean{
+		for(let i = 0;i < this.kernel_memory_ranges.length;i++){//[a,b) 左闭右开
+			if(Number(this.kernel_memory_ranges[i][0]) <= addr64 && addr64 < Number(this.kernel_memory_ranges[i][1])){
+				return true;
 			}
 		}
-		for(let i = 0;i<this.user_memory_ranges.length;i++){
-			if(Number(this.user_memory_ranges[i][0])<=addr64 && addr64 <Number(this.user_memory_ranges[i][1])){
-				return privilegeLevel.user;
+		return false;
+	}
+	public isUserAddr(addr64: number):boolean {
+		for(let i = 0;i < this.user_memory_ranges.length;i++){//[a,b) 左闭右开
+			if(Number(this.user_memory_ranges[i][0]) <= addr64 && addr64 < Number(this.user_memory_ranges[i][1])){
+				return true;
 			}
 		}
-		return privilegeLevel.unknown;
+		return false;
 	}
 }
-
-
-
-// function findAddr(info:MINode){
-// 	for(let i in info){
-// 		if(info[i]){
-			
-// 		}
-// 	}
-// }
 
 function prettyStringArray(strings: any) {
 	if (typeof strings == "object") {

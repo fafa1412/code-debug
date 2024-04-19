@@ -51,15 +51,15 @@ export class MI2 extends EventEmitter implements IBackend {
 		}
 	}
 
-	getMIinfo(num: number):Array<MINode> {
-		let info=[];
-		for(let i=this.miarray.length-1;i>=0;i--)
+	getOriginallyNoTokenMINodes(num: number):Array<MINode> {
+		const info = [];
+		for(let i = this.originallyNoTokenMINodes.length - 1;i >= 0;i--)
 		{
-			if(this.miarray[i].token==num)
+			if(this.originallyNoTokenMINodes[i].token == num)
 			{
-				info.push(this.miarray[i]);
+				info.push(this.originallyNoTokenMINodes[i]);
 				// console.log("getMIinfo:"+i+" "+this.miarray);
-				delete this.miarray[i];
+				delete this.originallyNoTokenMINodes[i]; //This will NOT cause bugs because `i` is going from high to low.
 			}
 		}
 		return info;
@@ -350,8 +350,8 @@ export class MI2 extends EventEmitter implements IBackend {
 			if (couldBeOutput(line)) {
 				if (!gdbMatch.exec(line)) this.log("stdout", line);
 			} else {
-				let parsed = parseMI(line);
-				console.log("parsed:"+JSON.stringify(parsed));
+				const parsed = parseMI(line);
+				console.log("parsed:" + JSON.stringify(parsed));
 				let handled = false;
 				if(parsed.token !== undefined){
 					if (this.handlers[parsed.token]) {
@@ -359,23 +359,23 @@ export class MI2 extends EventEmitter implements IBackend {
 						delete this.handlers[parsed.token];
 						handled = true;
 					}
-					this.num=this.num+1;
-					parsed.token=this.num;
+					this.tokenCount = this.tokenCount + 1;
+					parsed.token = this.tokenCount; //new tokens of those tokenless nodes will unable to pair their have-token counterparts if MINodes are sent out of order (e.g. token2-token4-token3) or 1 GDB command triggers 1 have-token node and more than 2 tokenless nodes.
 				}
 				else{
-					parsed.token=this.num+1;
-					this.miarray.push(parsed);
-					if (this.miarray.length>=100)
+					parsed.token = this.tokenCount + 1;
+					this.originallyNoTokenMINodes.push(parsed);
+					if (this.originallyNoTokenMINodes.length >= 100)
 					{
-						this.miarray.splice(0,90);
-						const rest=this.miarray.splice(89);
-						this.miarray=rest;
+						this.originallyNoTokenMINodes.splice(0, 90);
+						const rest = this.originallyNoTokenMINodes.splice(89);
+						this.originallyNoTokenMINodes = rest;
 					}
-				}				
+				}
 				if (this.debugOutput)
 				{
-					this.log("stdout", "GDB -> App: "+prettyPrintJSON(parsed));
-					console.log("onoutput:"+JSON.stringify(parsed));
+					this.log("stdout", "GDB -> App: " + prettyPrintJSON(parsed));
+					console.log("onoutput:" + JSON.stringify(parsed));
 				}
 				// if (parsed.token !== undefined) {
 				// 	if (this.handlers[parsed.token]) {
@@ -563,6 +563,15 @@ export class MI2 extends EventEmitter implements IBackend {
 		});
 	}
 
+	stepInstruction(reverse: boolean = false): Thenable<boolean> {
+		if (trace) this.log("stderr", "stepInstruction");
+		return new Promise((resolve, reject) => {
+			this.sendCommand("exec-step-instruction" + (reverse ? " --reverse" : "")).then((info) => {
+				resolve(info.resultRecords.resultClass == "running");
+			}, reject);
+		});
+	}
+
 	stepOut(reverse: boolean = false): Thenable<boolean> {
 		if (trace) this.log("stderr", "stepOut");
 		return new Promise((resolve, reject) => {
@@ -660,7 +669,7 @@ export class MI2 extends EventEmitter implements IBackend {
 			}, reject);
 		});
 	}
-	//czy try
+
 	removeBreakPoint(breakpoint: Breakpoint): Thenable<boolean> {
 		if (trace) this.log("stderr", "removeBreakPoint");
 		return new Promise((resolve, reject) => {
@@ -692,6 +701,34 @@ export class MI2 extends EventEmitter implements IBackend {
 					this.breakpoints.set(index, k);
 				}
 			});
+			Promise.all(promises).then(resolve, reject);
+		});
+	}
+
+	addSymbolFile(filepath:string): Thenable<any> {
+		if (trace) this.log("stderr", "addSymbolFile");
+		return new Promise((resolve, reject) => {
+			const promises: Thenable<void | MINode>[] = [];
+			promises.push(
+				this.sendCliCommand("add-symbol-file " + filepath).then((result) => {
+					if (result.resultRecords.resultClass == "done") resolve(true);
+					else resolve(false);
+				})
+			);
+			Promise.all(promises).then(resolve, reject);
+		});
+	}
+
+	removeSymbolFile(filepath:string): Thenable<any> {
+		if (trace) this.log("stderr", "removeSymbolFile");
+		return new Promise((resolve, reject) => {
+			const promises: Thenable<void | MINode>[] = [];
+			promises.push(
+				this.sendCliCommand("remove-symbol-file " + filepath).then((result) => {
+					if (result.resultRecords.resultClass == "done") resolve(true);
+					else resolve(false);
+				})
+			);
 			Promise.all(promises).then(resolve, reject);
 		});
 	}
@@ -798,7 +835,7 @@ export class MI2 extends EventEmitter implements IBackend {
 		return names;
 	}
 
-	// 
+	//
 	/// We already have new code doing this so it becomes outdated
 	//
 	//
@@ -856,6 +893,31 @@ export class MI2 extends EventEmitter implements IBackend {
 	// 	return ret;
 	// }
 
+	/// Always return hex like 0x114514
+	async getSomeRegisters(register_ids:number[]):Promise<Variable[]> {
+		if (trace)
+			this.log("stderr", "getSomeRegisters");
+
+		// Getting register names and values are separate GDB commands.
+		// We first retrieve the register names and then the values.
+		// The register names should never change, so we could cache and reuse them,
+		// but for now we just retrieve them every time to keep it simple.
+		const names = await this.getRegisterNames();
+		const values = await this.getSomeRegisterValues(register_ids);
+		const ret: Variable[] = [];
+		for (const val of values) {
+			const key = names[val.index];
+			const value = val.value;
+			const type = "string";
+			ret.push({
+				name: key,
+				valueStr: value,
+				type: type
+			});
+		}
+		return ret;
+	}
+
 	async getRegisters(): Promise<Variable[]> {
 		if (trace)
 			this.log("stderr", "getRegisters");
@@ -889,6 +951,26 @@ export class MI2 extends EventEmitter implements IBackend {
 			throw new Error('Failed to retrieve register names.');
 		}
 		return names.map(name => name.toString());
+	}
+
+	async getSomeRegisterValues(register_ids:number[]): Promise<RegisterValue[]> {
+		if (trace)
+			this.log("stderr", "getSomeRegisterValues");
+		let mi_string = "data-list-register-values x ";
+		for(const num of register_ids){
+			mi_string += num.toString() + " ";
+		}
+		const result = await this.sendCommand(mi_string);
+		const nodes = result.result('register-values');
+		if (!Array.isArray(nodes)) {
+			throw new Error('Failed to retrieve some register values.');
+		}
+		const ret: RegisterValue[] = nodes.map(node => {
+			const index = parseInt(MINode.valueOf(node, "number"));
+			const value = MINode.valueOf(node, "value");
+			return { index: index, value: value };
+		});
+		return ret;
 	}
 
 	async getRegisterValues(): Promise<RegisterValue[]> {
@@ -1040,8 +1122,8 @@ export class MI2 extends EventEmitter implements IBackend {
 	protected buffer: string;
 	protected errbuf: string;
 	protected process: ChildProcess.ChildProcess;
-	protected miarray:MINode[]=[];//存放原来没有token的信息
-	protected num: number = 0;
+	protected originallyNoTokenMINodes:MINode[] = [];//存放原来没有token的信息
+	protected tokenCount: number = 0;
 	protected stream: ClientChannel;
 	protected sshConn: Client;
 }
