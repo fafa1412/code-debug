@@ -1,8 +1,8 @@
 {
-	"name": "debug",
-	"displayName": "OS Debug",
-	"homepage":"https://github.com/chenzhiy2001/code-debug/README-ExtensionMarkets.md",
-	"description": "OS Debugger based on WebFreak001/Native Debug",
+	"name": "os-debug",
+	"displayName": "OS Debugger",
+	"homepage":"https://github.com/chenzhiy2001/code-debug/blob/master/README-ExtensionMarkets.md",
+	"description": "code-debug Operating System Debugger",
 	"keywords": [
 		"gdb",
 		"os",
