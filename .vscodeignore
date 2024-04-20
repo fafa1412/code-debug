@@ -9,6 +9,7 @@ out/src/test/**
 test/**
 src/**
 **/*.map
+docs/**
 .gitignore
 .markdownlintignore
 .markdownlint.yml
@@ -22,3 +23,5 @@ cspell-dict.txt
 HACKING.md
 tsconfig.json
 vsc-extension-quickstart.md
+演示视频.mp4
+最终报告.pdf

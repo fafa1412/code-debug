@@ -1,6 +1,7 @@
 {
 	"name": "debug",
 	"displayName": "OS Debug",
+	"homepage":"https://github.com/chenzhiy2001/code-debug/README-ExtensionMarkets.md",
 	"description": "OS Debugger based on WebFreak001/Native Debug",
 	"keywords": [
 		"gdb",
@@ -1063,8 +1064,8 @@
 		"ts-node": "^10.8.0"
 	},
 	"__metadata": {
-		"id": "2fd22b8e-b3b8-4e7f-9a28-a5e2d1bdd0d4",
+		"id": "834c44ce-c4a8-4cfe-9de6-27b5a5531e6b",
 		"publisherDisplayName": "chenzhiy2001",
-		"publisherId": "e054f80a-50f9-4d80-85c8-6ff87eef6c35"
+		"publisherId": "chenzhiy2001"
 	}
 }
