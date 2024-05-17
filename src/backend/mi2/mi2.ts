@@ -1,4 +1,4 @@
-import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, VariableObject, MIError, Register} from "../backend";
+import { Breakpoint, IBackend, Thread, Stack, SSHArguments, Variable, RegisterValue, VariableObject, MIError, Register } from "../backend";
 import * as ChildProcess from "child_process";
 import { EventEmitter } from "events";
 import { parseMI, MINode } from '../mi_parse';
@@ -6,8 +6,8 @@ import * as linuxTerm from '../linux/console';
 import * as net from "net";
 import * as fs from "fs";
 import * as path from "path";
-import { Client } from "ssh2";
 import {prettyPrintJSON} from "../../utils";
+import { Client, ClientChannel, ExecOptions } from "ssh2";
 
 export function escape(str: string) {
 	return str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -35,7 +35,7 @@ export class MI2 extends EventEmitter implements IBackend {
 		super();
 
 		if (procEnv) {
-			const env = {};
+			const env: { [key: string]: string } = {};
 			// Duplicate process.env so we don't override it
 			for (const key in process.env)
 				if (process.env.hasOwnProperty(key)) env[key] = process.env[key];
@@ -51,15 +51,15 @@ export class MI2 extends EventEmitter implements IBackend {
 		}
 	}
 
-	getMIinfo(num: number):Array<MINode> {
-		let info=[];
-		for(let i=this.miarray.length-1;i>=0;i--)
+	getOriginallyNoTokenMINodes(num: number):Array<MINode> {
+		const info = [];
+		for(let i = this.originallyNoTokenMINodes.length - 1;i >= 0;i--)
 		{
-			if(this.miarray[i].token==num)
+			if(this.originallyNoTokenMINodes[i].token == num)
 			{
-				info.push(this.miarray[i]);
+				info.push(this.originallyNoTokenMINodes[i]);
 				// console.log("getMIinfo:"+i+" "+this.miarray);
-				delete this.miarray[i];
+				delete this.originallyNoTokenMINodes[i]; //This will NOT cause bugs because `i` is going from high to low.
 			}
 		}
 		return info;
@@ -75,8 +75,8 @@ export class MI2 extends EventEmitter implements IBackend {
 			this.process = ChildProcess.spawn(this.application, args, { cwd: cwd, env: this.procEnv });
 			this.process.stdout.on("data", this.stdout.bind(this));
 			this.process.stderr.on("data", this.stderr.bind(this));
-			this.process.on("exit", (() => { this.emit("quit"); }).bind(this));
-			this.process.on("error", ((err) => { this.emit("launcherror", err); }).bind(this));
+			this.process.on("exit", () => this.emit("quit"));
+			this.process.on("error", err => this.emit("launcherror", err));
 			const promises = this.initCommands(target, cwd);
 			if (procArgs && procArgs.length)
 				promises.push(this.sendCommand("exec-arguments " + procArgs));
@@ -155,7 +155,7 @@ export class MI2 extends EventEmitter implements IBackend {
 
 			this.sshConn.on("ready", () => {
 				this.log("stdout", "Running " + this.application + " over ssh...");
-				const execArgs: any = {};
+				const execArgs: ExecOptions = {};
 				if (args.forwardX11) {
 					execArgs.x11 = {
 						single: false,
@@ -168,7 +168,7 @@ export class MI2 extends EventEmitter implements IBackend {
 					if (err) {
 						this.log("stderr", "Could not run " + this.application + "(" + sshCMD + ") over ssh!");
 						if (err === undefined) {
-							err = "<reason unknown>";
+							err = new Error("<reason unknown>");
 						}
 						this.log("stderr", err.toString());
 						this.emit("quit");
@@ -179,10 +179,10 @@ export class MI2 extends EventEmitter implements IBackend {
 					this.stream = stream;
 					stream.on("data", this.stdout.bind(this));
 					stream.stderr.on("data", this.stderr.bind(this));
-					stream.on("exit", (() => {
+					stream.on("exit", () => {
 						this.emit("quit");
 						this.sshConn.end();
-					}).bind(this));
+					});
 					const promises = this.initCommands(target, cwd, attach);
 					promises.push(this.sendCommand("environment-cd \"" + escape(cwd) + "\""));
 					if (attach) {
@@ -199,7 +199,7 @@ export class MI2 extends EventEmitter implements IBackend {
 			}).on("error", (err) => {
 				this.log("stderr", "Error running " + this.application + " over ssh!");
 				if (err === undefined) {
-					err = "<reason unknown>";
+					err = new Error("<reason unknown>");
 				}
 				this.log("stderr", err.toString());
 				this.emit("quit");
@@ -252,18 +252,8 @@ export class MI2 extends EventEmitter implements IBackend {
 			this.process = ChildProcess.spawn(this.application, args, { cwd: cwd, env: this.procEnv });
 			this.process.stdout.on("data", this.stdout.bind(this));
 			this.process.stderr.on("data", this.stderr.bind(this));
-			this.process.on(
-				"exit",
-				(() => {
-					this.emit("quit");
-				}).bind(this)
-			);
-			this.process.on(
-				"error",
-				((err) => {
-					this.emit("launcherror", err);
-				}).bind(this)
-			);
+			this.process.on("exit", () => this.emit("quit"));
+			this.process.on("error", err => this.emit("launcherror", err));
 			const promises = this.initCommands(target, cwd, true);
 			if (target.startsWith("extended-remote")) {
 				promises.push(this.sendCommand("target-select " + target));
@@ -292,18 +282,8 @@ export class MI2 extends EventEmitter implements IBackend {
 			this.process = ChildProcess.spawn(this.application, args, { cwd: cwd, env: this.procEnv });
 			this.process.stdout.on("data", this.stdout.bind(this));
 			this.process.stderr.on("data", this.stderr.bind(this));
-			this.process.on(
-				"exit",
-				(() => {
-					this.emit("quit");
-				}).bind(this)
-			);
-			this.process.on(
-				"error",
-				((err) => {
-					this.emit("launcherror", err);
-				}).bind(this)
-			);
+			this.process.on("exit", () => this.emit("quit"));
+			this.process.on("error", err => this.emit("launcherror", err));
 			const promises = this.initCommands(target, cwd, true);
 			promises.push(this.sendCommand("target-select remote " + target));
 			promises.push(...autorun.map(value => { return this.sendUserInput(value); }));
@@ -314,11 +294,14 @@ export class MI2 extends EventEmitter implements IBackend {
 		});
 	}
 
-	stdout(data) {
-		if (trace) this.log("stderr", "stdout: " + data);
-		if (typeof data == "string") this.buffer += data;
-		else this.buffer += data.toString("utf8");
-		const end = this.buffer.lastIndexOf("\n");
+	stdout(data: any) {
+		if (trace)
+			this.log("stderr", "stdout: " + data);
+		if (typeof data == "string")
+			this.buffer += data;
+		else
+			this.buffer += data.toString("utf8");
+		const end = this.buffer.lastIndexOf('\n');
 		if (end != -1) {
 			this.onOutput(this.buffer.substring(0, end));
 			this.buffer = this.buffer.substring(end + 1);
@@ -330,10 +313,12 @@ export class MI2 extends EventEmitter implements IBackend {
 		}
 	}
 
-	stderr(data) {
-		if (typeof data == "string") this.errbuf += data;
-		else this.errbuf += data.toString("utf8");
-		const end = this.errbuf.lastIndexOf("\n");
+	stderr(data: any) {
+		if (typeof data == "string")
+			this.errbuf += data;
+		else
+			this.errbuf += data.toString("utf8");
+		const end = this.errbuf.lastIndexOf('\n');
 		if (end != -1) {
 			this.onOutputStderr(this.errbuf.substring(0, end));
 			this.errbuf = this.errbuf.substring(end + 1);
@@ -344,14 +329,14 @@ export class MI2 extends EventEmitter implements IBackend {
 		}
 	}
 
-	onOutputStderr(lines) {
-		lines = <string[]>lines.split("\n");
-		lines.forEach((line) => {
+	onOutputStderr(str: string) {
+		const lines = str.split('\n');
+		lines.forEach(line => {
 			this.log("stderr", line);
 		});
 	}
 
-	onOutputPartial(line) {
+	onOutputPartial(line: string) {
 		if (couldBeOutput(line)) {
 			this.logNoNewLine("stdout", line);
 			return true;
@@ -359,16 +344,14 @@ export class MI2 extends EventEmitter implements IBackend {
 		return false;
 	}
 
-	onOutput(lines) {
-		lines = <string[]>lines.split("\n");
-		console.log("lines:"+lines);
-		lines.forEach((line) => {
-			console.log("line:"+line);
+	onOutput(str: string) {
+		const lines = str.split('\n');
+		lines.forEach(line => {
 			if (couldBeOutput(line)) {
 				if (!gdbMatch.exec(line)) this.log("stdout", line);
 			} else {
-				let parsed = parseMI(line);
-				console.log("parsed:"+JSON.stringify(parsed));
+				const parsed = parseMI(line);
+				console.log("parsed:" + JSON.stringify(parsed));
 				let handled = false;
 				if(parsed.token !== undefined){
 					if (this.handlers[parsed.token]) {
@@ -376,23 +359,23 @@ export class MI2 extends EventEmitter implements IBackend {
 						delete this.handlers[parsed.token];
 						handled = true;
 					}
-					this.num=this.num+1;
-					parsed.token=this.num;
+					this.tokenCount = this.tokenCount + 1;
+					parsed.token = this.tokenCount; //new tokens of those tokenless nodes will unable to pair their have-token counterparts if MINodes are sent out of order (e.g. token2-token4-token3) or 1 GDB command triggers 1 have-token node and more than 2 tokenless nodes.
 				}
 				else{
-					parsed.token=this.num+1;
-					this.miarray.push(parsed);
-					if (this.miarray.length>=100)
+					parsed.token = this.tokenCount + 1;
+					this.originallyNoTokenMINodes.push(parsed);
+					if (this.originallyNoTokenMINodes.length >= 100)
 					{
-						this.miarray.splice(0,90);
-						const rest=this.miarray.splice(89);
-						this.miarray=rest;
+						this.originallyNoTokenMINodes.splice(0, 90);
+						const rest = this.originallyNoTokenMINodes.splice(89);
+						this.originallyNoTokenMINodes = rest;
 					}
-				}				
+				}
 				if (this.debugOutput)
 				{
-					this.log("stdout", "GDB -> App: "+prettyPrintJSON(parsed));
-					console.log("onoutput:"+JSON.stringify(parsed));
+					this.log("stdout", "GDB -> App: " + prettyPrintJSON(parsed));
+					console.log("onoutput:" + JSON.stringify(parsed));
 				}
 				// if (parsed.token !== undefined) {
 				// 	if (this.handlers[parsed.token]) {
@@ -580,6 +563,15 @@ export class MI2 extends EventEmitter implements IBackend {
 		});
 	}
 
+	stepInstruction(reverse: boolean = false): Thenable<boolean> {
+		if (trace) this.log("stderr", "stepInstruction");
+		return new Promise((resolve, reject) => {
+			this.sendCommand("exec-step-instruction" + (reverse ? " --reverse" : "")).then((info) => {
+				resolve(info.resultRecords.resultClass == "running");
+			}, reject);
+		});
+	}
+
 	stepOut(reverse: boolean = false): Thenable<boolean> {
 		if (trace) this.log("stderr", "stepOut");
 		return new Promise((resolve, reject) => {
@@ -607,16 +599,18 @@ export class MI2 extends EventEmitter implements IBackend {
 	}
 
 	loadBreakPoints(breakpoints: Breakpoint[]): Thenable<[boolean, Breakpoint][]> {
-		if (trace) this.log("stderr", "loadBreakPoints");
-		const promisses = [];
-		breakpoints.forEach((breakpoint) => {
+		if (trace)
+			this.log("stderr", "loadBreakPoints");
+		const promisses: Thenable<[boolean, Breakpoint]>[] = [];
+		breakpoints.forEach(breakpoint => {
 			promisses.push(this.addBreakPoint(breakpoint));
 		});
 		return Promise.all(promisses);
 	}
 
-	setBreakPointCondition(bkptNum, condition): Thenable<any> {
-		if (trace) this.log("stderr", "setBreakPointCondition");
+	setBreakPointCondition(bkptNum: number, condition: string): Thenable<any> {
+		if (trace)
+			this.log("stderr", "setBreakPointCondition");
 		return this.sendCommand("break-condition " + bkptNum + " " + condition);
 	}
 
@@ -675,7 +669,7 @@ export class MI2 extends EventEmitter implements IBackend {
 			}, reject);
 		});
 	}
-	//czy try
+
 	removeBreakPoint(breakpoint: Breakpoint): Thenable<boolean> {
 		if (trace) this.log("stderr", "removeBreakPoint");
 		return new Promise((resolve, reject) => {
@@ -692,7 +686,7 @@ export class MI2 extends EventEmitter implements IBackend {
 	clearBreakPoints(source?: string): Thenable<any> {
 		if (trace) this.log("stderr", "clearBreakPoints");
 		return new Promise((resolve, reject) => {
-			const promises = [];
+			const promises: Thenable<void | MINode>[] = [];
 			const breakpoints = this.breakpoints;
 			this.breakpoints = new Map();
 			breakpoints.forEach((k, index) => {
@@ -711,6 +705,34 @@ export class MI2 extends EventEmitter implements IBackend {
 		});
 	}
 
+	addSymbolFile(filepath:string): Thenable<any> {
+		if (trace) this.log("stderr", "addSymbolFile");
+		return new Promise((resolve, reject) => {
+			const promises: Thenable<void | MINode>[] = [];
+			promises.push(
+				this.sendCliCommand("add-symbol-file " + filepath).then((result) => {
+					if (result.resultRecords.resultClass == "done") resolve(true);
+					else resolve(false);
+				})
+			);
+			Promise.all(promises).then(resolve, reject);
+		});
+	}
+
+	removeSymbolFile(filepath:string): Thenable<any> {
+		if (trace) this.log("stderr", "removeSymbolFile");
+		return new Promise((resolve, reject) => {
+			const promises: Thenable<void | MINode>[] = [];
+			promises.push(
+				this.sendCliCommand("remove-symbol-file " + filepath).then((result) => {
+					if (result.resultRecords.resultClass == "done") resolve(true);
+					else resolve(false);
+				})
+			);
+			Promise.all(promises).then(resolve, reject);
+		});
+	}
+
 	async getThreads(): Promise<Thread[]> {
 		if (trace) this.log("stderr", "getThreads");
 
@@ -718,13 +740,15 @@ export class MI2 extends EventEmitter implements IBackend {
 		const result = await this.sendCommand(command);
 		const threads = result.result("threads");
 		const ret: Thread[] = [];
-		return threads.map((element) => {
+		if (!Array.isArray(threads)) { // workaround for lldb-mi bug: `'^done,threads="[]"'`
+			return ret;
+		}
+		return threads.map(element => {
 			const ret: Thread = {
 				id: parseInt(MINode.valueOf(element, "id")),
 				targetId: MINode.valueOf(element, "target-id"),
+				name: MINode.valueOf(element, "name") || MINode.valueOf(element, "details")
 			};
-
-			ret.name = MINode.valueOf(element, "details") || undefined;
 
 			return ret;
 		});
@@ -751,7 +775,7 @@ export class MI2 extends EventEmitter implements IBackend {
 
 		const result = await this.sendCommand(["stack-list-frames"].concat(options).join(" "));
 		const stack = result.result("stack");
-		return stack.map(element => {
+		return stack.map((element: any) => {
 			const level = MINode.valueOf(element, "@frame.level");
 			const addr = MINode.valueOf(element, "@frame.addr");
 			const func = MINode.valueOf(element, "@frame.func");
@@ -811,57 +835,157 @@ export class MI2 extends EventEmitter implements IBackend {
 		return names;
 	}
 
-	async getRegistersValues(): Promise<any[]> {
-		if (trace) this.log("stderr", "getRegistersValues");
-		const result = await this.sendCommand(`data-list-register-values r \
-		0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20\
-		21 22 23 24 25 26 27 28 29 30 31 32`);
-		/* ${riscvRegNames.indexOf("uscratch")} \
-		${riscvRegNames.indexOf("uepc")} \
-		${riscvRegNames.indexOf("ucause")} \
-		${riscvRegNames.indexOf("utval")} \
-		${riscvRegNames.indexOf("uip")} \
-		${riscvRegNames.indexOf("sstatus")} \
-		${riscvRegNames.indexOf("sedeleg")} \
-		${riscvRegNames.indexOf("sideleg")} \
-		${riscvRegNames.indexOf("sie")} \
-		${riscvRegNames.indexOf("stvec")} \
-		${riscvRegNames.indexOf("scounteren")} \
-		${riscvRegNames.indexOf("sscratch")} \
-		${riscvRegNames.indexOf("sepc")} \
-		${riscvRegNames.indexOf("scause")} \
-		${riscvRegNames.indexOf("stval")} \
-		${riscvRegNames.indexOf("sip")} \
-		${riscvRegNames.indexOf("satp")} \
-		${riscvRegNames.indexOf("mstatus")} \
-		${riscvRegNames.indexOf("misa")} \
-		${riscvRegNames.indexOf("medeleg")} \
-		${riscvRegNames.indexOf("mideleg")} \
-		${riscvRegNames.indexOf("mie")} \
-		${riscvRegNames.indexOf("mtvec")} \
-		${riscvRegNames.indexOf("mcounteren")} \ */
+	//
+	/// We already have new code doing this so it becomes outdated
+	//
+	//
+	// async getRegistersValues(): Promise<any[]> {
+	// 	if (trace) this.log("stderr", "getRegistersValues");
+	// 	const result = await this.sendCommand(`data-list-register-values r \
+	// 	0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20\
+	// 	21 22 23 24 25 26 27 28 29 30 31 32`);
+	// 	/* ${riscvRegNames.indexOf("uscratch")} \
+	// 	${riscvRegNames.indexOf("uepc")} \
+	// 	${riscvRegNames.indexOf("ucause")} \
+	// 	${riscvRegNames.indexOf("utval")} \
+	// 	${riscvRegNames.indexOf("uip")} \
+	// 	${riscvRegNames.indexOf("sstatus")} \
+	// 	${riscvRegNames.indexOf("sedeleg")} \
+	// 	${riscvRegNames.indexOf("sideleg")} \
+	// 	${riscvRegNames.indexOf("sie")} \
+	// 	${riscvRegNames.indexOf("stvec")} \
+	// 	${riscvRegNames.indexOf("scounteren")} \
+	// 	${riscvRegNames.indexOf("sscratch")} \
+	// 	${riscvRegNames.indexOf("sepc")} \
+	// 	${riscvRegNames.indexOf("scause")} \
+	// 	${riscvRegNames.indexOf("stval")} \
+	// 	${riscvRegNames.indexOf("sip")} \
+	// 	${riscvRegNames.indexOf("satp")} \
+	// 	${riscvRegNames.indexOf("mstatus")} \
+	// 	${riscvRegNames.indexOf("misa")} \
+	// 	${riscvRegNames.indexOf("medeleg")} \
+	// 	${riscvRegNames.indexOf("mideleg")} \
+	// 	${riscvRegNames.indexOf("mie")} \
+	// 	${riscvRegNames.indexOf("mtvec")} \
+	// 	${riscvRegNames.indexOf("mcounteren")} \ */
 
-		//czy test
-		//const result = new MINode(114514,[],{resultClass:"resultClass",results:[["string","any"]],});
-		const registers = result.result("register-values");
-		// console.log(registers);
-		const ret: Register[] = [];
-		/* viloent ugly way */
-		//ret.push({name:"all",valueStr:registers});
-		//vilonet way
-		return registers;
-		// elegant way
-		/*
-		for (const element of registers) {
-			const key = MINode.valueOf(element, "number");
-			const value = MINode.valueOf(element, "value");
+	// 	//czy test
+	// 	//const result = new MINode(114514,[],{resultClass:"resultClass",results:[["string","any"]],});
+	// 	const registers = result.result("register-values");
+	// 	// console.log(registers);
+	// 	const ret: Register[] = [];
+	// 	/* viloent ugly way */
+	// 	//ret.push({name:"all",valueStr:registers});
+	// 	//vilonet way
+	// 	return registers;
+	// 	// elegant way
+	// 	/*
+	// 	for (const element of registers) {
+	// 		const key = MINode.valueOf(element, "number");
+	// 		const value = MINode.valueOf(element, "value");
+	// 		ret.push({
+	// 			name: key,
+	// 			valueStr: value,
+	// 		});
+	// 	}
+	// 	*/
+
+	// 	return ret;
+	// }
+
+	/// Always return hex like 0x114514
+	async getSomeRegisters(register_ids:number[]):Promise<Variable[]> {
+		if (trace)
+			this.log("stderr", "getSomeRegisters");
+
+		// Getting register names and values are separate GDB commands.
+		// We first retrieve the register names and then the values.
+		// The register names should never change, so we could cache and reuse them,
+		// but for now we just retrieve them every time to keep it simple.
+		const names = await this.getRegisterNames();
+		const values = await this.getSomeRegisterValues(register_ids);
+		const ret: Variable[] = [];
+		for (const val of values) {
+			const key = names[val.index];
+			const value = val.value;
+			const type = "string";
 			ret.push({
 				name: key,
 				valueStr: value,
+				type: type
 			});
 		}
-		*/
+		return ret;
+	}
 
+	async getRegisters(): Promise<Variable[]> {
+		if (trace)
+			this.log("stderr", "getRegisters");
+
+		// Getting register names and values are separate GDB commands.
+		// We first retrieve the register names and then the values.
+		// The register names should never change, so we could cache and reuse them,
+		// but for now we just retrieve them every time to keep it simple.
+		const names = await this.getRegisterNames();
+		const values = await this.getRegisterValues();
+		const ret: Variable[] = [];
+		for (const val of values) {
+			const key = names[val.index];
+			const value = val.value;
+			const type = "string";
+			ret.push({
+				name: key,
+				valueStr: value,
+				type: type
+			});
+		}
+		return ret;
+	}
+
+	async getRegisterNames(): Promise<string[]> {
+		if (trace)
+			this.log("stderr", "getRegisterNames");
+		const result = await this.sendCommand("data-list-register-names");
+		const names = result.result('register-names');
+		if (!Array.isArray(names)) {
+			throw new Error('Failed to retrieve register names.');
+		}
+		return names.map(name => name.toString());
+	}
+
+	async getSomeRegisterValues(register_ids:number[]): Promise<RegisterValue[]> {
+		if (trace)
+			this.log("stderr", "getSomeRegisterValues");
+		let mi_string = "data-list-register-values x ";
+		for(const num of register_ids){
+			mi_string += num.toString() + " ";
+		}
+		const result = await this.sendCommand(mi_string);
+		const nodes = result.result('register-values');
+		if (!Array.isArray(nodes)) {
+			throw new Error('Failed to retrieve some register values.');
+		}
+		const ret: RegisterValue[] = nodes.map(node => {
+			const index = parseInt(MINode.valueOf(node, "number"));
+			const value = MINode.valueOf(node, "value");
+			return { index: index, value: value };
+		});
+		return ret;
+	}
+
+	async getRegisterValues(): Promise<RegisterValue[]> {
+		if (trace)
+			this.log("stderr", "getRegisterValues");
+		const result = await this.sendCommand("data-list-register-values N 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32");//todo THIS IS RISC-V ONLY!
+		const nodes = result.result('register-values');
+		if (!Array.isArray(nodes)) {
+			throw new Error('Failed to retrieve register values.');
+		}
+		const ret: RegisterValue[] = nodes.map(node => {
+			const index = parseInt(MINode.valueOf(node, "number"));
+			const value = MINode.valueOf(node, "value");
+			return { index: index, value: value };
+		});
 		return ret;
 	}
 
@@ -892,13 +1016,14 @@ export class MI2 extends EventEmitter implements IBackend {
 		return await this.sendCommand(command);
 	}
 
-	async varCreate(
-		expression: string,
-		name: string = "-",
-		frame: string = "@"
-	): Promise<VariableObject> {
-		if (trace) this.log("stderr", "varCreate");
-		const res = await this.sendCommand(`var-create ${this.quote(name)} ${frame} "${expression}"`);
+	async varCreate(threadId: number, frameLevel: number, expression: string, name: string = "-", frame: string = "@"): Promise<VariableObject> {
+		if (trace)
+			this.log("stderr", "varCreate");
+		let miCommand = "var-create ";
+		if (threadId != 0) {
+			miCommand += `--thread ${threadId} --frame ${frameLevel}`;
+		}
+		const res = await this.sendCommand(`${miCommand} ${this.quote(name)} ${frame} "${expression}"`);
 		return new VariableObject(res.result(""));
 	}
 
@@ -912,7 +1037,7 @@ export class MI2 extends EventEmitter implements IBackend {
 		//TODO: add `from` and `to` arguments
 		const res = await this.sendCommand(`var-list-children --all-values ${this.quote(name)}`);
 		const children = res.result("children") || [];
-		const omg: VariableObject[] = children.map((child) => new VariableObject(child[1]));
+		const omg: VariableObject[] = children.map((child: any) => new VariableObject(child[1]));
 		return omg;
 	}
 
@@ -997,8 +1122,8 @@ export class MI2 extends EventEmitter implements IBackend {
 	protected buffer: string;
 	protected errbuf: string;
 	protected process: ChildProcess.ChildProcess;
-	protected stream;
-	protected miarray:MINode[]=[];//存放原来没有token的信息
-	protected num: number = 0;
-	protected sshConn;
+	protected originallyNoTokenMINodes:MINode[] = [];//存放原来没有token的信息
+	protected tokenCount: number = 0;
+	protected stream: ClientChannel;
+	protected sshConn: Client;
 }

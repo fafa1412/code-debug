@@ -1,182 +1,230 @@
 import * as vscode from "vscode";
 import * as os from "os";
 import * as ChildProcess from "child_process";
+import * as path from "path";
+import { ObjectAsFunction, prettyPrintJSON } from "../utils";
+import { ADDRGETNETWORKPARAMS } from "dns";
+import { Border } from "../mibase";
+import { HookBreakpointJSONFriendly } from "../mibase";
+import { Breakpoint } from "../backend/backend";
 
-//=========================================================================================
-let userDebugFile = "initproc"; //可以修改为其它用户程序名，如matrix
-let userConf = {// Default values are suitable for rCore-Tutorial-v3 since it is most commonly used
-	KERNEL_IN_BREAKPOINTS_LINE:65, 
-	KERNEL_OUT_BREAKPOINTS_LINE:124, 
-	GO_TO_KERNEL_LINE:30, 
-	KERNEL_IN_BREAKPOINTS_FILENAME:"src/trap/mod.rs",
-	KERNEL_OUT_BREAKPOINTS_FILENAME:"src/trap/mod.rs",
-	GO_TO_KERNEL_FILENAME:"src/trap/mod.rs",
-	executable:"",//executable with symbol. absolute path
-	userSpaceDebuggeeFolder:""//absolute path
-}
-//========================================================================================
 
 export function activate(context: vscode.ExtensionContext) {
 
 	// Only allow a single Panel
-	let currentPanel: vscode.WebviewPanel | undefined = undefined;
+	const currentPanel: vscode.WebviewPanel | undefined = undefined;
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('code-debug.eBPFPanel', () => {
 			if(currentPanel){
 				currentPanel.reveal(vscode.ViewColumn.Two);
 			}else{
-		  const panel = vscode.window.createWebviewPanel(
-			'eBPFPanel',
-			'eBPFPanel',
-			vscode.ViewColumn.Two,
-			{
-			  enableScripts: true
-			}
-		  );
-	
-		  panel.webview.html = getWebviewContent();
-	
-		  // Handle messages from the webview
-		  panel.webview.onDidReceiveMessage(
-			message => {
-			  switch (message.command) {
-				case 'send_gdb_cli_command':
-					vscode.debug.activeDebugSession?.customRequest("send_gdb_cli_command",message.text);
-					break;
-				case 'send_gdb_mi_command':
-					vscode.debug.activeDebugSession?.customRequest("send_gdb_mi_command",message.text);
-					break;
-				case 'enable_side_stub':
-					vscode.debug.activeDebugSession?.customRequest("send_gdb_cli_command","so "+vscode.workspace.workspaceFolders[0].uri.path+"/side-stub.py");
-					break;
-				case 'detect_side_stub_port':
-					//😺
-					ChildProcess.exec('cat '+vscode.workspace.workspaceFolders[0].uri.path+'/code_debug_qemu_output_history.txt | grep -a "char device redirected to" | tail -1', 
-					(err, stdout, stderr) => {
-						let re = /(?<=char device redirected to ).*(?= \()/;
-						panel.webview.postMessage({ command: 'side_stub_port_is',text:re.exec(stdout)[0]});
-						//console.log('stdout: ' + stdout);
-						if(stderr){
-							console.log('stderr in finding side_stub_port: ' + stderr)
-						};
-						if (err) {
-							console.log('error in finding side_stub_port: ' + err);
+				const panel = vscode.window.createWebviewPanel(
+					'eBPFPanel',
+					'eBPFPanel',
+					vscode.ViewColumn.Two,
+					{
+						enableScripts: true
+					}
+				);
+
+				panel.webview.html = getWebviewContent();
+
+				// Handle messages from the webview
+				panel.webview.onDidReceiveMessage(
+					message => {
+						switch (message.command) {
+							case 'send_gdb_cli_command':
+								vscode.debug.activeDebugSession?.customRequest("send_gdb_cli_command", message.text);
+								break;
+							case 'send_gdb_mi_command':
+								vscode.debug.activeDebugSession?.customRequest("send_gdb_mi_command", message.text);
+								break;
+							case 'enable_side_stub':
+								vscode.debug.activeDebugSession?.customRequest("send_gdb_cli_command", "so " + vscode.workspace.workspaceFolders[0].uri.path + "/side-stub.py");
+								break;
+							case 'detect_side_stub_port':
+								//😺
+								ChildProcess.exec('cat ' + vscode.workspace.workspaceFolders[0].uri.path + '/code_debug_qemu_output_history.txt | grep -a "char device redirected to" | tail -1',
+									(err, stdout, stderr) => {
+										const re = /(?<=char device redirected to ).*(?= \()/;
+										panel.webview.postMessage({ command: 'side_stub_port_is', text:re.exec(stdout)[0]});
+										//console.log('stdout: ' + stdout);
+										if(stderr){
+											console.log('stderr in finding side_stub_port: ' + stderr);
+										}
+										if (err) {
+											console.log('error in finding side_stub_port: ' + err);
+										}
+									});
+								break;
+							case 'exec_ebpf_daemon':
+								ChildProcess.exec('active_window_id=$(xdotool search --onlyvisible --class "code" | tail -1) && xdotool windowactivate "$active_window_id" && xdotool key ctrl+grave && xdotool type ebpf_user_gdbserver && xdotool key Return');
+								break;
+
 						}
-					});
-					break;
-				case 'exec_ebpf_daemon':
-					ChildProcess.exec('active_window_id=$(xdotool search --onlyvisible --class "code" | tail -1) && xdotool windowactivate "$active_window_id" && xdotool key ctrl+grave && xdotool type ebpf_user_gdbserver && xdotool key Return');
-					break;
+					},
+					undefined,
+					context.subscriptions
+				);
+				vscode.commands.registerCommand('code-debug.registerSelectedSymbolInUserSpace', () => {
+					const activeTextEditor = vscode.window.activeTextEditor;
+					if (activeTextEditor) {
+						const selection = activeTextEditor.selection;
+						if (!selection.isEmpty) {
+							const selectedText = activeTextEditor.document.getText(selection);
+							let sourceFilename = activeTextEditor.document.fileName;
+							//get filename only. strip file path
+							let i = sourceFilename.lastIndexOf('/');
+							if (i <= 0) {
+								i = sourceFilename.lastIndexOf('\\');
+							}
+							if (i >= 0) {
+								sourceFilename = sourceFilename.substring(i + 1);
+							}
+							const binaryFileName = sourceFilename.replace(/\.[^/.]+$/, "");
 
-			  }
-			},
-			undefined,
-			context.subscriptions
-		  );
-		  vscode.commands.registerCommand('code-debug.registerSelectedSymbolInUserSpace', () => {
-			const activeTextEditor = vscode.window.activeTextEditor;
-			if (activeTextEditor) {
-				const selection = activeTextEditor.selection;
-				if (!selection.isEmpty) {
-					let selectedText = activeTextEditor.document.getText(selection);
-					let sourceFilename = activeTextEditor.document.fileName;
-					//get filename only. strip file path
-					let i = sourceFilename.lastIndexOf('/');
-					if (i <= 0) {
-						i = sourceFilename.lastIndexOf('\\');
-					}
-					if (i >= 0) {
-						sourceFilename = sourceFilename.substring(i + 1);
-					}
-					let binaryFileName = sourceFilename.replace(/\.[^/.]+$/, "");
-
-					ChildProcess.exec('nm '+vscode.workspace.workspaceFolders[0].uri.path+'/user/target/riscv64gc-unknown-none-elf/release/'+binaryFileName+' | rustfilt |grep '+selectedText, 
-					(err, stdout, stderr) => {
-						console.log('stdout: ' + stdout);
-						panel.webview.postMessage({ command: 'symbol_table_update',text:stdout.split('\n'),program_name:binaryFileName});
-						//console.log('stdout: ' + stdout);
-						if(stderr){
-							console.log('stderr in registering selected symbol: ' + stderr)
-						};
-						if (err) {
-							console.log('error in registering selected symbol: ' + err);
+							ChildProcess.exec('nm ' + vscode.workspace.workspaceFolders[0].uri.path + '/user/target/riscv64gc-unknown-none-elf/release/' + binaryFileName + ' | rustfilt |grep ' + selectedText,
+								(err, stdout, stderr) => {
+									console.log('stdout: ' + stdout);
+									panel.webview.postMessage({ command: 'symbol_table_update', text:stdout.split('\n'), program_name:binaryFileName});
+									//console.log('stdout: ' + stdout);
+									if(stderr){
+										console.log('stderr in registering selected symbol: ' + stderr);
+									}
+									if (err) {
+										console.log('error in registering selected symbol: ' + err);
+									}
+								});
+							//vscode.env.clipboard.writeText(text);
 						}
-					});
-					//vscode.env.clipboard.writeText(text);
 					}
-			}
-		});
-		vscode.commands.registerCommand('code-debug.registerSelectedSymbolInKernel', () => {
-			const activeTextEditor = vscode.window.activeTextEditor;
-			if (activeTextEditor) {
-				const selection = activeTextEditor.selection;
-				if (!selection.isEmpty) {
-					let selectedText = activeTextEditor.document.getText(selection);
-					let sourceFilename = activeTextEditor.document.fileName;
-					//get filename only. strip file path
-					let i = sourceFilename.lastIndexOf('/');
-					if (i <= 0) {
-						i = sourceFilename.lastIndexOf('\\');
-					}
-					if (i >= 0) {
-						sourceFilename = sourceFilename.substring(i + 1);
-					}
-					let binaryFileName = sourceFilename.replace(/\.[^/.]+$/, "");
-
-					ChildProcess.exec('nm '+vscode.workspace.workspaceFolders[0].uri.path+'/os/target/riscv64gc-unknown-none-elf/release/'+'os'+' | rustfilt |grep '+selectedText, 
-					(err, stdout, stderr) => {
-						console.log('stdout: ' + stdout);
-						panel.webview.postMessage({ command: 'symbol_table_update',text:stdout.split('\n'),program_name:"kernel"});
-						//console.log('stdout: ' + stdout);
-						if(stderr){
-							console.log('stderr in registering selected symbol: ' + stderr)
-						};
-						if (err) {
-							console.log('error in registering selected symbol: ' + err);
+				});
+				vscode.commands.registerCommand('code-debug.registerSelectedSymbolInKernel', () => {
+					const activeTextEditor = vscode.window.activeTextEditor;
+					if (activeTextEditor) {
+						const selection = activeTextEditor.selection;
+						if (!selection.isEmpty) {
+							const selectedText = activeTextEditor.document.getText(selection);
+							let sourceFilename = activeTextEditor.document.fileName;
+							//get filename only. strip file path
+							let i = sourceFilename.lastIndexOf('/');
+							if (i <= 0) {
+								i = sourceFilename.lastIndexOf('\\');
+							}
+							if (i >= 0) {
+								sourceFilename = sourceFilename.substring(i + 1);
+							}
+							const binaryFileName = sourceFilename.replace(/\.[^/.]+$/, "");
+							//todo rCore-Tutorial only!
+							ChildProcess.exec('nm ' + vscode.workspace.workspaceFolders[0].uri.path + '/os/target/riscv64gc-unknown-none-elf/release/' + 'os' + ' | rustfilt |grep ' + selectedText,
+								(err, stdout, stderr) => {
+									console.log('stdout: ' + stdout);
+									panel.webview.postMessage({ command: 'symbol_table_update', text:stdout.split('\n'), program_name:"kernel"});
+									//console.log('stdout: ' + stdout);
+									if(stderr){
+										console.log('stderr in registering selected symbol: ' + stderr);
+									}
+									if (err) {
+										console.log('error in registering selected symbol: ' + err);
+									}
+								});
+							//vscode.env.clipboard.writeText(text);
 						}
-					});
-					//vscode.env.clipboard.writeText(text);
 					}
-			}
-		});
-}})
-	  );
-
-	// vscode.debug.onDidStartDebugSession((e: vscode.DebugSession) => {
-	// 	vscode.commands.executeCommand("core-debugger.startPanel"); //当启动调试会话时
-	// });
+				});
+			}})
+	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("code-debug.examineMemoryLocation", examineMemory)
 	);
 
+	const setBorderBreakpointsFromLaunchJSONCmd = vscode.commands.registerCommand(
+		"code-debug.setBorderBreakpointsFromLaunchJSON",
+		() => {
+			// launch.json configuration
+			const config = vscode.workspace.getConfiguration(
+				'launch',
+				vscode.workspace.workspaceFolders[0].uri
+			);
+			// retrieve values
+			const userConfNotSubstituted:any[] = config.get('configurations');
+			const bordersNotSubstitued:Border[] = userConfNotSubstituted[0].border_breakpoints;
+			const borders = bordersNotSubstitued.map(b=>new Border(variablesSubstitution(b.filepath), b.line));
+			for(const border of borders){
+				// we set the line index to 0 since currently we don't want to deal with positions in a line
+				// notice that vscode.Position line number starts at 0 while the line number we usually use starts with 1
+				const breakpoint = new vscode.SourceBreakpoint(new vscode.Location(vscode.Uri.file(border.filepath), new vscode.Position(border.line - 1, 0)), true);
+				vscode.debug.addBreakpoints([breakpoint]);//this will go through setBreakPointsRequest in mibase.ts
+				vscode.debug.activeDebugSession?.customRequest('setBorder', border);
+			}
+			vscode.window.showInformationMessage("All border breakpoints from launch.json are set.");
+		}
+	);
+	const setHookBreakpointsFromLaunchJSONCmd = vscode.commands.registerCommand(
+		"code-debug.setHookBreakpointsFromLaunchJSON",
+		() => {
+			// launch.json configuration
+			const config = vscode.workspace.getConfiguration(
+				'launch',
+				vscode.workspace.workspaceFolders[0].uri
+			);
+			// retrieve values
+			const userConfNotSubstituted:any[] = config.get('configurations');
+			const hooksNotSubstituted:HookBreakpointJSONFriendly[] = userConfNotSubstituted[0].hook_breakpoints;
+			const hooks = hooksNotSubstituted.map(h=>{
+				return {
+					breakpoint:{
+						file:variablesSubstitution(h.breakpoint.file),
+						line:h.breakpoint.line
+					} as Breakpoint,
+					behavior:new ObjectAsFunction(variablesSubstitution(h.behavior.functionArguments), variablesSubstitution(h.behavior.functionBody), h.behavior.isAsync)
+				} as HookBreakpointJSONFriendly;
+			});
+			for(const hook of hooks){
+				// we set the line index to 0 since currently we don't want to deal with positions in a line
+				const breakpoint = new vscode.SourceBreakpoint(new vscode.Location(vscode.Uri.file(hook.breakpoint.file), new vscode.Position(hook.breakpoint.line - 1, 0)), true);
+				vscode.debug.addBreakpoints([breakpoint]);//this will go through setBreakPointsRequest in mibase.ts
+				vscode.debug.activeDebugSession?.customRequest('setHookBreakpoint', hook);
+			}
+			vscode.window.showInformationMessage("All hook breakpoints from launch.json are set.");
+		}
+	);
 
+	/* example
+	[
+		{
+			"lineNumber": 133,
+			"uri": {
+				"$mid": 1,
+				"fsPath": "/home/oslab/rCore-Tutorial-v3-eBPF/rCore-Tutorial-v3/os/src/task/process.rs",
+				"external": "file:///home/oslab/rCore-Tutorial-v3-eBPF/rCore-Tutorial-v3/os/src/task/process.rs",
+				"path": "/home/oslab/rCore-Tutorial-v3-eBPF/rCore-Tutorial-v3/os/src/task/process.rs",
+				"scheme": "file"
+			}
+		},
+		null
+	]
+	*/
 
-	const removeDebugFileCmd = vscode.commands.registerCommand("code-debug.removeDebugFile", () => {
-		// 自定义请求.customRequest函数见/src/mibase.ts
-		vscode.debug.activeDebugSession?.customRequest("removeDebugFile", {
-			debugFilepath:
-			userConf.userSpaceDebuggeeFolder+userDebugFile,
-		});
-		// 弹出窗口
-		vscode.window.showInformationMessage("symbol file "+userDebugFile+" removed");
+	//There is only 1 border per breakpoint group. So it you set border twice in a breakpoint group, the newer one will replace the older one.
+	const setBreakpointAsBorderCmd = vscode.commands.registerCommand('code-debug.setBreakpointAsBorder', (...args) => {
+		const uri = args[0].uri;
+		const fullpath = args[0].uri.fsPath; // fsPath provides the path in the form appropriate for the os.
+		const lineNumber = args[0].lineNumber;
+		// we set the line index to 0 since currently we don't want to deal with positions in a line
+		const breakpoint = new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(lineNumber - 1, 0)), true);
+		// vscode.debug.addBreakpoints([breakpoint]);//this will go through setBreakPointsRequest in mibase.ts
+		vscode.debug.activeDebugSession?.customRequest('setBorder', new Border(fullpath, lineNumber));
 	});
 
-	const setKernelInBreakpointsCmd = vscode.commands.registerCommand(
-		"code-debug.setKernelInBreakpoints",
-		() => {
-			vscode.debug.activeDebugSession?.customRequest("setKernelInBreakpoints");
-			vscode.window.showInformationMessage("Kernel In Breakpoints Set");
-		}
-	);
-	const setKernelOutBreakpointsCmd = vscode.commands.registerCommand(
-		"code-debug.setKernelOutBreakpoints",
-		() => {
-			vscode.debug.activeDebugSession?.customRequest("setKernelOutBreakpoints");
-			vscode.window.showInformationMessage("Kernel Out Breakpoints Set");
-		}
-	);
+	const disableBorderOfThisBreakpointGroupCmd = vscode.commands.registerCommand('code-debug.disableBorderOfThisBreakpointGroup', (...args) => {
+		const uri = args[0].uri;
+		const fullpath = args[0].uri.fsPath; // fsPath provides the path in the form appropriate for the os.
+		const lineNumber = args[0].lineNumber;
+		vscode.debug.activeDebugSession?.customRequest('disableBorder', new Border(fullpath, lineNumber));
+	});
 
 	const removeAllCliBreakpointsCmd = vscode.commands.registerCommand(
 		"code-debug.removeAllCliBreakpoints",
@@ -186,37 +234,21 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	);
 
-	const goToKernelCmd = vscode.commands.registerCommand(
-		"code-debug.goToKernel",
+	const disableCurrentBreakpointGroupBreakpointsCmd = vscode.commands.registerCommand(
+		"code-debug.disableCurrentBreakpointGroupBreakpointsCmd",
 		() => {
-			vscode.debug.activeDebugSession?.customRequest("goToKernel");
-			vscode.window.showInformationMessage("go to kernel");
+			vscode.window.showInformationMessage("disableCurrentBreakpointGroupBreakpoints received");
+			vscode.debug.activeDebugSession?.customRequest("disableCurrentBreakpointGroupBreakpoints");
 		}
 	);
-
-	const disableCurrentSpaceBreakpointsCmd = vscode.commands.registerCommand(
-		"code-debug.disableCurrentSpaceBreakpoints",
-		() => {
-			vscode.window.showInformationMessage("disableCurrentSpaceBreakpoints received");
-			vscode.debug.activeDebugSession?.customRequest("disableCurrentSpaceBreakpoints");
-		}
-	);
-
-	// const updateAllSpacesBreakpointsInfoCmd = vscode.commands.registerCommand(
-	// 	"updateAllSpacesBreakpointsInfo",
-	// 	() => {
-	// 		vscode.debug.activeDebugSession?.customRequest("update");
-	// 	}
-	// );
 
 	context.subscriptions.push(
-		removeDebugFileCmd,
-		setKernelInBreakpointsCmd,
-		setKernelOutBreakpointsCmd,
+		setBorderBreakpointsFromLaunchJSONCmd,
+		setHookBreakpointsFromLaunchJSONCmd,
+		setBreakpointAsBorderCmd,
+		disableBorderOfThisBreakpointGroupCmd,
 		removeAllCliBreakpointsCmd,
-		disableCurrentSpaceBreakpointsCmd,
-		//updateAllSpacesBreakpointsInfoCmd,
-		goToKernelCmd,
+		disableCurrentBreakpointGroupBreakpointsCmd,
 	);
 
 	const disposable = vscode.debug.registerDebugAdapterTrackerFactory("*", {
@@ -231,76 +263,10 @@ export function activate(context: vscode.ExtensionContext) {
 				},
 				//监听Debug Adapter发送给VSCode的消息
 				onDidSendMessage: (message) => {
-					//console.log("//////////MESSAGE///////////\n "+JSON.stringify(message)+"\n//////////////////\n ");
-					//TODO use switch case
-					if (message.command === "setBreakpoints") {
-						//如果Debug Adapter设置了一个断点
-						//更新寄存器信息
-						//更新断点信息
-						vscode.debug.activeDebugSession?.customRequest("update");
-					}
+					//处理自定义事件
 					if (message.type === "event") {
-						//如果（因为断点等）停下
-						//更新TreeView中的信息
-						if (message.event === "stopped") {
-							vscode.debug.activeDebugSession?.customRequest("update");//TODO WHY USE `update`?????? update WHAT???????
-						} //处理自定义事件
-						else if (message.event === "eventTest") {
+						if (message.event === "eventTest") {
 							console.log("Extension Received eventTest");
-						}
-						else if (message.event === "kernelToUserBorder") {
-							//到达内核态->用户态的边界
-							// removeAllCliBreakpoints();
-							vscode.window.showInformationMessage("will keep simple stepping to user space");
-							vscode.debug.activeDebugSession?.customRequest("kernelSingleSteppingToUser", {});
-						}
-						else if (message.event === "kernelSingleSteppedToUser") {
-							vscode.window.showInformationMessage("will switched to " + userConf.userSpaceDebuggeeFolder +userDebugFile + " breakpoints");
-							vscode.debug.activeDebugSession?.customRequest("addDebugFile", {
-								debugFilepath:
-									userConf.userSpaceDebuggeeFolder +userDebugFile,
-									//tag:oscomp2023 original "/user/target/riscv64gc-unknown-none-elf/release/" +userDebugFile,
-			
-							});
-							vscode.debug.activeDebugSession?.customRequest(
-								"updateCurrentSpace",userDebugFile
-								//tag:oscomp2023 original:"src/bin/" + userDebugFile + ".rs"
-							);
-							// TODO@werifu: show User space
-							//vscode.debug.activeDebugSession?.customRequest("disableCurrentSpaceBreakpoints");
-							vscode.window.showInformationMessage(
-								"All breakpoints in current space removed. Symbol file " +
-								userConf.userSpaceDebuggeeFolder+userDebugFile +
-									" added. Now you can set user program breakpoints.  line 11 `fn main() -> i32 {` or line 13 println!(\"aaaaa... recommemded if it's initproc.rs"
-							);
-							console.log("/////////////////////////kernelToUserBorder///////////////////");
-						}
-						//从用户态进入内核的trap处理函数
-						else if (message.event === "trap_handle") {
-							//vscode.window.showInformationMessage("switched to trap_handle");
-							vscode.debug.activeDebugSession?.customRequest("addDebugFile", {
-								debugFilepath:
-									userConf.executable,
-							});
-							vscode.debug.activeDebugSession?.customRequest(
-								"updateCurrentSpace",
-								"kernel"//TODO this value used to be src/trap/mod.rs which means border breakpoints belongs to a unique space. now we changed it to 'kernel'
-							);
-							vscode.window.showInformationMessage("go to kernel trap_handle");
-						}
-						//当前在内核态
-						else if (message.event === "inKernel") {
-							// TODO@werifu: show Kernel space
-							//removeAllCliBreakpoints();
-							vscode.window.showInformationMessage("switched to kernel breakpoints");
-							console.log("/////////////////////////INKERNEL///////////////////");
-						}
-						//当前在用户态
-						else if (message.event === "inUser") {
-							// TODO@werifu: show Kernel space
-							//removeAllCliBreakpoints();
-							vscode.window.showInformationMessage("switched to user breakpoints");
-							console.log(message.body);
 						}
 						else if (message.event === "info") {
 							console.log("//////////////INFO///////////");
@@ -311,45 +277,15 @@ export function activate(context: vscode.ExtensionContext) {
 							console.log(message.body);
 						} else if (message.event === "showErrorMessage") {
 							vscode.window.showErrorMessage(message.body);
-						} else if (message.event === "update") {
-							vscode.window.showInformationMessage("断点信息表格已经更新");
-							
-						} else if(message.event === "get_pname"){
-							console.log("get pname:"+message.body);
-							userDebugFile=message.body;
-						}else if (message.event === "newProcessNameAddr") {
-							console.log("newProcessNameAddr");
-						
-							vscode.debug.activeDebugSession?.customRequest("getStringFromAddr", message.body);
-
-
-
-							// let quotation_regex = /"(.*?)"/;
-	
-							
-							//let process_name = info[0].outOfBandRecord[0].content.match(quotation_regex)[0].toString();
-
-
-
-
-
-							
 						}
 						else if (message.event === "output"){
-							if (message.body.output.startsWith('eBPF Message: ')){//messages sent from 
+							if (message.body.output.startsWith('eBPF Message: ')){//messages sent from
 								vscode.window.showInformationMessage(message.body.output);
 							}
-							if (message.body.output.startsWith('0x')&&message.body.output.endsWith('"\n')){//new process names
-								vscode.window.showInformationMessage(message.body.output);
-								let quotation_regex = /"(.*?)"/;
-								let newProcessName=message.body.output;								;
-								userDebugFile= newProcessName.match(quotation_regex)[0].toString().slice(1, -1);
-								vscode.window.showInformationMessage("new process "+userDebugFile+" updated");
-							}
-							
 						}
-						else if (message.event === "c"){
-							
+						else {
+							//do nothing because too annoying
+							//vscode.window.showInformationMessage('unknown message.event: '+JSON.stringify(message));
 						}
 					}
 				},
@@ -396,8 +332,50 @@ export const getUriForDebugMemory = (
 	);
 };
 
+// if you get launch.json attributes in extension.ts, the variables in the attributes are not being substituted.
+// so we have to do it on our own.
+function variablesSubstitution(string:string, recursive = false):string {
+	const workspaces = vscode.workspace.workspaceFolders;
+	//original: const workspace = vscode.workspace.workspaceFolders.length ? vscode.workspace.workspaceFolders[0] : null;
+	const workspace = vscode.workspace.workspaceFolders.length ? vscode.workspace.workspaceFolders[0] : undefined;
+	const activeFile = vscode.window.activeTextEditor?.document;
+	const absoluteFilePath = activeFile?.uri.fsPath;
+	string = string.replace(/\${workspaceFolder}/g, workspace?.uri.fsPath);
+	string = string.replace(/\${workspaceFolderBasename}/g, workspace?.name);
+	string = string.replace(/\${file}/g, absoluteFilePath);
+	let activeWorkspace = workspace;
+	let relativeFilePath = absoluteFilePath;
+	for (const workspace of workspaces) {
+		if (absoluteFilePath.replace(workspace.uri.fsPath, '') !== absoluteFilePath) {
+			activeWorkspace = workspace;
+			relativeFilePath = absoluteFilePath.replace(workspace.uri.fsPath, '').substr(path.sep.length);
+			break;
+		}
+	}
+	const parsedPath = path.parse(absoluteFilePath);
+	string = string.replace(/\${fileWorkspaceFolder}/g, activeWorkspace?.uri.fsPath);
+	string = string.replace(/\${relativeFile}/g, relativeFilePath);
+	string = string.replace(/\${relativeFileDirname}/g, relativeFilePath.substr(0, relativeFilePath.lastIndexOf(path.sep)));
+	string = string.replace(/\${fileBasename}/g, parsedPath.base);
+	string = string.replace(/\${fileBasenameNoExtension}/g, parsedPath.name);
+	string = string.replace(/\${fileExtname}/g, parsedPath.ext);
+	string = string.replace(/\${fileDirname}/g, parsedPath.dir.substr(parsedPath.dir.lastIndexOf(path.sep) + 1));
+	string = string.replace(/\${cwd}/g, parsedPath.dir);
+	string = string.replace(/\${pathSeparator}/g, path.sep);
+	string = string.replace(/\${lineNumber}/g, (vscode.window.activeTextEditor.selection.start.line + 1).toString());
+	string = string.replace(/\${selectedText}/g, vscode.window.activeTextEditor.document.getText(new vscode.Range(vscode.window.activeTextEditor.selection.start, vscode.window.activeTextEditor.selection.end)));
+	string = string.replace(/\${env:(.*?)}/g, function (variable) {
+		return process.env[variable.match(/\${env:(.*?)}/)[1]] || '';
+	});
+	string = string.replace(/\${config:(.*?)}/g, function (variable) {
+		return vscode.workspace.getConfiguration().get(variable.match(/\${config:(.*?)}/)[1], '');
+	});
 
-
+	if (recursive && string.match(/\${(workspaceFolder|workspaceFolderBasename|fileWorkspaceFolder|relativeFile|fileBasename|fileBasenameNoExtension|fileExtname|fileDirname|cwd|pathSeparator|lineNumber|selectedText|env:(.*?)|config:(.*?))}/)) {
+		string = variablesSubstitution(string, recursive);
+	}
+	return string;
+}
 
 function getWebviewContent(){
 	return `<!DOCTYPE html>

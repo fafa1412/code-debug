@@ -6,11 +6,6 @@
 5. qemu 支持新串口（为什么要用第二个串口，pmp，基于中断的串口消息收发机制（正是因为这个机制，消息不
    能返回 server，而是直接由 eBPF 程序返回），qemu virtio）
 
+没写的内容： ebpf 实现：移植，升级，对 eBPF 以外的符号信息的依赖；
 
-
-
-没写的内容：
-ebpf实现：移植，升级，对eBPF以外的符号信息的依赖；
-
-eBPF lambda 图
-helpers
+eBPF lambda 图 helpers

@@ -1,14 +1,15 @@
 {
-	"name": "debug",
-	"displayName": "OS Debug",
-	"description": "OS Debugger based on WebFreak001/Native Debug",
+	"name": "os-debug",
+	"displayName": "OS Debugger",
+	"homepage":"https://github.com/chenzhiy2001/code-debug/blob/master/README-ExtensionMarkets.md",
+	"description": "code-debug Operating System Debugger",
 	"keywords": [
 		"gdb",
 		"os",
 		"debug"
 	],
 	"license": "public domain",
-	"version": "1.0.0",
+	"version": "2.0.0",
 	"publisher": "chenzhiy2001",
 	"icon": "images/icon.png",
 	"engines": {
@@ -35,27 +36,17 @@
 			"editor/title": [
 				{
 					"when": "resourceLangId == rust",
-					"command": "code-debug.removeDebugFile",
-					"group": "navigation"
-				},
-				{
-					"when": "resourceLangId == rust",
-					"command": "code-debug.setKernelInBreakpoints",
-					"group": "navigation"
-				},
-				{
-					"when": "resourceLangId == rust",
-					"command": "code-debug.setKernelOutBreakpoints",
-					"group": "navigation"
-				},
-				{
-					"when": "resourceLangId == rust",
 					"command": "code-debug.removeAllCliBreakpoints",
 					"group": "navigation"
 				},
 				{
 					"when": "resourceLangId == rust",
-					"command": "code-debug.goToKernel",
+					"command": "code-debug.setBorderBreakpointsFromLaunchJSON",
+					"group": "navigation"
+				},
+				{
+					"when": "resourceLangId == rust",
+					"command": "code-debug.setHookBreakpointsFromLaunchJSON",
 					"group": "navigation"
 				},
 				{
@@ -68,21 +59,29 @@
 				{
 					"command": "code-debug.registerSelectedSymbolInKernel",
 					"group": "9_cutcopypaste"
-				  },
+				},
 				{
-				  "command": "code-debug.registerSelectedSymbolInUserSpace",
-				  "group": "9_cutcopypaste"
+					"command": "code-debug.registerSelectedSymbolInUserSpace",
+					"group": "9_cutcopypaste"
 				}
-
-			  ]
+			],
+			"editor/lineNumber/context": [
+				{
+					"command": "code-debug.setBreakpointAsBorder",
+					"group": "9_cutcopypaste"
+				},
+				{
+					"command": "code-debug.disableBorderOfThisBreakpointGroup",
+					"group": "9_cutcopypaste"
+				}
+			]
 		},
 		"commands": [
-			
 			{
 				"command": "code-debug.eBPFPanel",
 				"title": "eBPF WebView",
 				"category": "CoreDebugger"
-			  },
+			},
 			{
 				"command": "code-debug.examineMemoryLocation",
 				"title": "Code-Debug: Examine memory location"
@@ -106,35 +105,27 @@
 				}
 			},
 			{
-				"command": "code-debug.setKernelInBreakpoints",
-				"title": "Set Kernel-In Breakpoints",
+				"command": "code-debug.setBorderBreakpointsFromLaunchJSON",
+				"title": "Set Border Breakpoints from `launch.json`.",
 				"icon": {
-					"dark": "images/set-kernel-in-out-breakpoints-dark.svg",
-					"light": "images/set-kernel-in-out-breakpoints-light.svg"
+					"dark": "images/set-border-breakpoints-dark.svg",
+					"light": "images/set-border-breakpoints-light.svg"
 				}
 			},
 			{
-				"command": "code-debug.setKernelOutBreakpoints",
-				"title": "Set Kernel-Out Breakpoints",
+				"command": "code-debug.setHookBreakpointsFromLaunchJSON",
+				"title": "Set hook breakpoints (from launch.json) which is breakpoints with user-defined debugger behavior when triggered.",
 				"icon": {
-					"dark": "images/set-kernel-in-out-breakpoints-dark.svg",
-					"light": "images/set-kernel-in-out-breakpoints-light.svg"
+					"dark": "images/set-border-breakpoints-dark.svg",
+					"light": "images/set-border-breakpoints-light.svg"
 				}
 			},
 			{
 				"command": "code-debug.removeAllCliBreakpoints",
-				"title": "Remove All Cli Breakpoints",
+				"title": "Remove all breakpoints (delete breakpoints in editor and debugger cli) , borders and hooks",
 				"icon": {
 					"dark": "images/remove-all-cli-breakpoints-dark.svg",
 					"light": "images/remove-all-cli-breakpoints-light.svg"
-				}
-			},
-			{
-				"command": "code-debug.goToKernel",
-				"title": "go to kernel ",
-				"icon": {
-					"dark": "images/update-all-spaces-breakpoints-info-dark.svg",
-					"light": "images/update-all-spaces-breakpoints-info-light.svg"
 				}
 			},
 			{
@@ -152,6 +143,14 @@
 			{
 				"command": "code-debug.registerSelectedSymbolInKernel",
 				"title": "Register Selected Symbol in Kernel"
+			},
+			{
+				"command": "code-debug.setBreakpointAsBorder",
+				"title": "set this breakpoint as border"
+			},
+			{
+				"command": "code-debug.disableBorderOfThisBreakpointGroup",
+				"title": "disable border breakpoint of this breakpoint group"
 			}
 		],
 		"breakpoints": [
@@ -229,7 +228,7 @@
 					"riscv"
 				],
 				"configurationAttributes": {
-					"launch": {
+					"attach": {
 						"required": [
 							"target",
 							"cwd"
@@ -281,7 +280,7 @@
 							"valuesFormatting": {
 								"type": "string",
 								"description": "Set the way of showing variable values. 'disabled' - show value as is, 'parseText' - parse debuggers output text into structure, 'prettyPrinters' - enable debuggers custom pretty-printers if there are any",
-								"default": "parseText",
+								"default": "prettyPrinters",
 								"enum": [
 									"disabled",
 									"parseText",
@@ -350,12 +349,52 @@
 									"-S"
 								]
 							},
-							"userSpaceDebuggeeFolder": {
-								"type": "string",
-								"description": "userspace executable folder which executables inside will be debugged",
-								"default": 
-									"please_configure_userSpaceDebuggeeFolder"
+							"program_counter_id": {
+								"type": "number",
+								"description": "id of pc register. 32 in riscv",
+								"default": 32
+							},
+							"first_breakpoint_group":{
+								"type":"string",
+								"description":"Name of first breakpoint group",
+								"default":"kernel"
+							},
+							"second_breakpoint_group":{
+								"type":"string",
+								"description":"Name of second breakpoint group if debugger failed to fetch second breakpoint group automatically",
+								"default":"${workspaceFolder}/user/src/bin/initproc.rs"
+							},
+							"kernel_memory_ranges":{
+								"type":"array",
+								"description":"ranges of kernel address",
+								"default":[["0xefffffffffffffff","0xffffffffffffffff"]]
+							},
+							"user_memory_ranges":{
+								"type":"array",
+								"description":"ranges of user address",
+								"default":[["0x0000000000000000","0xe000000000000000"]]
+							},
+							"border_breakpoints":{
+								"type":"array",
+								"description":"Border breakpoints of each breakpoint group. One border breakpoint can belong to more than one breakpoint groups according to your `filePathToBreakpointGroupNames` function.",
+								"default":[{"filepath":"${workspaceFolder}/user/src/syscall.rs","line":39},{"filepath":"${workspaceFolder}/os/src/trap/mod.rs","line":152}]
+							},
+							"hook_breakpoints":{
+								"type":"array",
+								"description":"breakpoints and user-submitted js codes used to fetch next user program name",
+								"default":[{"breakpoint":{"file":"${workspaceFolder}/os/src/syscall/process.rs","line":49},"behavior":{"isAsync":true,"functionArguments":"","functionBody":"let p=await this.getStringVariable('path'); return '${workspaceFolder}/user/src/bin/'+p+'.rs';"}}]
+							},
+							"filePathToBreakpointGroupNames":{
+								"type":"object",
+								"description":"user-submitted js code used to turn a filepath into breakpoint group name",
+								"default":{"isAsync":false,"functionArguments":"filePathStr","functionBody":"     if (filePathStr.includes('os/src')) {        return ['kernel'];    }    else if (filePathStr.includes('user/src/bin')) {        return [filePathStr];    }    else if (!filePathStr.includes('user/src/bin') && filePathStr.includes('user/src')) {        return ['${workspaceFolder}/user/src/bin/adder_atomic.rs', '${workspaceFolder}/user/src/bin/adder_mutex_blocking.rs', '${workspaceFolder}/user/src/bin/adder_mutex_spin.rs', '${workspaceFolder}/user/src/bin/adder_peterson_spin.rs', '${workspaceFolder}/user/src/bin/adder_peterson_yield.rs', '${workspaceFolder}/user/src/bin/adder.rs', '${workspaceFolder}/user/src/bin/adder_simple_spin.rs', '${workspaceFolder}/user/src/bin/adder_simple_yield.rs', '${workspaceFolder}/user/src/bin/barrier_condvar.rs', '${workspaceFolder}/user/src/bin/barrier_fail.rs', '${workspaceFolder}/user/src/bin/cat.rs', '${workspaceFolder}/user/src/bin/cmdline_args.rs', '${workspaceFolder}/user/src/bin/condsync_condvar.rs', '${workspaceFolder}/user/src/bin/condsync_sem.rs', '${workspaceFolder}/user/src/bin/count_lines.rs', '${workspaceFolder}/user/src/bin/eisenberg.rs', '${workspaceFolder}/user/src/bin/exit.rs', '${workspaceFolder}/user/src/bin/fantastic_text.rs', '${workspaceFolder}/user/src/bin/filetest_simple.rs', '${workspaceFolder}/user/src/bin/forktest2.rs', '${workspaceFolder}/user/src/bin/forktest.rs', '${workspaceFolder}/user/src/bin/forktest_simple.rs', '${workspaceFolder}/user/src/bin/forktree.rs', '${workspaceFolder}/user/src/bin/gui_rect.rs', '${workspaceFolder}/user/src/bin/gui_simple.rs', '${workspaceFolder}/user/src/bin/gui_snake.rs', '${workspaceFolder}/user/src/bin/gui_uart.rs', '${workspaceFolder}/user/src/bin/hello_world.rs', '${workspaceFolder}/user/src/bin/huge_write_mt.rs', '${workspaceFolder}/user/src/bin/huge_write.rs', '${workspaceFolder}/user/src/bin/infloop.rs', '${workspaceFolder}/user/src/bin/initproc.rs', '${workspaceFolder}/user/src/bin/inputdev_event.rs', '${workspaceFolder}/user/src/bin/matrix.rs', '${workspaceFolder}/user/src/bin/mpsc_sem.rs', '${workspaceFolder}/user/src/bin/peterson.rs', '${workspaceFolder}/user/src/bin/phil_din_mutex.rs', '${workspaceFolder}/user/src/bin/pipe_large_test.rs', '${workspaceFolder}/user/src/bin/pipetest.rs', '${workspaceFolder}/user/src/bin/priv_csr.rs', '${workspaceFolder}/user/src/bin/priv_inst.rs', '${workspaceFolder}/user/src/bin/race_adder_arg.rs', '${workspaceFolder}/user/src/bin/random_num.rs', '${workspaceFolder}/user/src/bin/run_pipe_test.rs', '${workspaceFolder}/user/src/bin/sleep.rs', '${workspaceFolder}/user/src/bin/sleep_simple.rs', '${workspaceFolder}/user/src/bin/stackful_coroutine.rs', '${workspaceFolder}/user/src/bin/stackless_coroutine.rs', '${workspaceFolder}/user/src/bin/stack_overflow.rs', '${workspaceFolder}/user/src/bin/store_fault.rs', '${workspaceFolder}/user/src/bin/sync_sem.rs', '${workspaceFolder}/user/src/bin/tcp_simplehttp.rs', '${workspaceFolder}/user/src/bin/threads_arg.rs', '${workspaceFolder}/user/src/bin/threads.rs', '${workspaceFolder}/user/src/bin/udp.rs', '${workspaceFolder}/user/src/bin/until_timeout.rs', '${workspaceFolder}/user/src/bin/user_shell.rs', '${workspaceFolder}/user/src/bin/usertests.rs', '${workspaceFolder}/user/src/bin/yield.rs'];    }    else        return ['kernel'];"}
+							},
+							"breakpointGroupNameToDebugFilePath":{
+								"type":"object",
+								"description":"user-submitted js code used to turn breakpoint group name into its debug file's path",
+								"default":{"isAsync":false,"functionArguments":"groupName","functionBody":"if (groupName === 'kernel') {        return '${workspaceFolder}/os/target/riscv64gc-unknown-none-elf/release/os';    }    else {        let pathSplited = groupName.split('/');        let filename = pathSplited[pathSplited.length - 1].split('.');        let filenameWithoutExtension = filename[filename.length - 2];        return '${workspaceFolder}/user/target/riscv64gc-unknown-none-elf/release/' + filenameWithoutExtension;    }"}
 							}
+
 						}
 					}
 				},
@@ -1009,6 +1048,7 @@
 		"@istanbuljs/nyc-config-typescript": "^1.0.2",
 		"@types/mocha": "^5.2.6",
 		"@types/node": "^11.15.54",
+		"@types/ssh2": "^1.15.0",
 		"@types/vscode": "^1.55.0",
 		"@typescript-eslint/eslint-plugin": "^5.22.0",
 		"@typescript-eslint/parser": "^5.22.0",
@@ -1021,14 +1061,11 @@
 		"mocha": "^9.1.3",
 		"nyc": "^15.1.0",
 		"prettier": "^2.6.2",
-		"ts-node": "^10.8.0",
-		"typescript": "^3.9.3",
-		"xstate":"^5.5.2",
-		"pretty-format":"^29.7.0"
+		"ts-node": "^10.8.0"
 	},
 	"__metadata": {
-		"id": "2fd22b8e-b3b8-4e7f-9a28-a5e2d1bdd0d4",
+		"id": "834c44ce-c4a8-4cfe-9de6-27b5a5531e6b",
 		"publisherDisplayName": "chenzhiy2001",
-		"publisherId": "e054f80a-50f9-4d80-85c8-6ff87eef6c35"
+		"publisherId": "chenzhiy2001"
 	}
 }

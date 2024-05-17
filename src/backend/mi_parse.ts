@@ -153,19 +153,19 @@ export function parseMI(output: string): MINode {
 	*/
 
 	let token = undefined;
-	const outOfBandRecord = [];
+	const outOfBandRecord: { isStream: boolean, type: string, asyncClass: string, output: [string, any][], content: string }[] = [];
 	let resultRecords = undefined;
 
 	const asyncRecordType = {
 		"*": "exec",
 		"+": "status",
-		"=": "notify",
-	};
+		"=": "notify"
+	} as const;
 	const streamRecordType = {
 		"~": "console",
 		"@": "target",
-		"&": "log",
-	};
+		"&": "log"
+	} as const;
 
 	const parseCString = () => {
 		if (output[0] != '"') return "";
@@ -191,7 +191,7 @@ export function parseMI(output: string): MINode {
 		return str;
 	};
 
-	let parseValue, parseCommaResult, parseCommaValue, parseResult;
+	let parseValue: () => any, parseCommaResult: () => any, parseCommaValue: () => any, parseResult: () => any;
 
 	const parseTupleOrList = () => {
 		if (output[0] != "{" && output[0] != "[") return undefined;
@@ -265,9 +265,10 @@ export function parseMI(output: string): MINode {
 			output = output.substring(classMatch[0].length);
 			const asyncRecord = {
 				isStream: false,
-				type: asyncRecordType[match[2]],
+				type: asyncRecordType[match[2] as keyof typeof asyncRecordType],
 				asyncClass: classMatch[0],
-				output: [],
+				output: [] as any,
+				content: ""
 			};
 			let result;
 			while ((result = parseCommaResult())) asyncRecord.output.push(result);
@@ -275,8 +276,10 @@ export function parseMI(output: string): MINode {
 		} else if (match[3]) {
 			const streamRecord = {
 				isStream: true,
-				type: streamRecordType[match[3]],
+				type: streamRecordType[match[3] as keyof typeof streamRecordType],
 				content: parseCString(),
+				output: [] as [string, any][],
+				asyncClass: ""
 			};
 			outOfBandRecord.push(streamRecord);
 		}
@@ -299,5 +302,5 @@ export function parseMI(output: string): MINode {
 		output = output.replace(newlineRegex, "");
 	}
 
-	return new MINode(token, <any>outOfBandRecord || [], resultRecords);
+	return new MINode(token, outOfBandRecord || [], resultRecords);
 }
